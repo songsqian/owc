@@ -1,0 +1,657 @@
+---
+title: "Old Woman Creek Hydrologic Modeling"
+author: "Song Qian"
+date: "7/14/2018"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+packages<-function(x, repos="http://cran.r-project.org", ...){
+  x<-as.character(match.call()[[2]])
+  if (!require(x,character.only=TRUE)){
+    install.packages(pkgs=x, repos=repos, ...)
+    require(x,character.only=TRUE)
+  }
+}
+
+RHome <- getwd()
+dataDIR <- paste(RHome,"Data", sep="/")
+packages(arm)
+packages(lattice)
+packages(UsingR)
+packages(ggplot2)
+packages(dplyr)
+packages(reshape2)
+packages(tikzDevice)
+
+lm.plots <- function(lm.obj){
+    obj1<-xyplot(fitted(lm.obj)~(fitted(lm.obj)+resid(lm.obj)),
+                 panel = function(x, y,...) {
+                     panel.xyplot(x, y,...)
+                     panel.abline(0,1, col="red",...)
+                     panel.loess(x,y, span=1.0,col="green",...)
+                     panel.grid()
+                 },ylab="Fitted",xlab="Observed")
+    ## checking whether the predicted is in greement with the observed
+
+    obj2<-qqmath(~resid(lm.obj),
+                 panel = function(x,...) {
+                     panel.grid()
+                     panel.qqmath(x,...)
+                     panel.qqmathline(x,...)
+                 }, ylab="Residuals", xlab="Standard Normal Quantile"
+                 )
+    ## checking whether residuals are normally distributed
+
+    obj3<-xyplot(resid(lm.obj)~fitted(lm.obj), panel=function(x,y,...){
+        panel.grid()
+        panel.xyplot(x, y,...)
+        panel.abline(0, 0)
+        panel.loess(x, y, span=1, col=2,...)
+    }, ylab="Residuals", xlab="Fitted")
+    ## checking for patterns in residuals (independence)
+
+    obj4<-xyplot(sqrt(abs(resid(lm.obj)))~fitted(lm.obj), panel=function(x,y,...){
+        panel.grid()
+        panel.xyplot(x, y,...)
+        panel.loess(x, y, span=1, col=2,...)
+    }, ylab="Sqrt. Abs. Residuals", xlab="Fitted")
+    ## checking whether the residuals have a constant variance
+
+    obj5<-rfs(lm.obj, aspect=1)
+    ## visualizing R^2
+
+    obj6 <- xyplot(cooks.distance(lm.obj) ~ fitted(lm.obj),
+                   panel=function(x,y,...){
+                       panel.xyplot(x,y,...)
+                       panel.grid()},
+                   ylab="Cook's Distance", xlab="Fitted")
+    ## checking for influential data points
+
+    print(obj1, position = c(0.0, 0.0, 0.5, 1/3), more = T)
+    print(obj2, position = c(0.5, 0.0, 1.0, 1/3), more = T)
+    print(obj3, position = c(0.0, 1/3, 0.5, 2/3), more = T)
+    print(obj4, position = c(0.5, 1/3, 1.0, 2/3), more = T)
+    print(obj5, position = c(0.0, 2/3, 0.5, 1.0), more = T)
+    print(obj6, position = c(0.5, 2/3, 1.0, 1.0), more = F)
+    invisible()
+}
+
+```
+## Introduction
+This document includes R code used for processing data related to the
+Old Woman Creek (OWC) project. The main objective of the project is to
+develop a predictive model of water depth for evaluating the potential
+impact of projected future climate change on Old Woman Creek
+hydrology.  The model will be used in conjunction with biological
+monitoring program to project the climate impact on Old Woman Creek
+wetland ecosystem.
+
+This document records detailed data processing and model building
+steps. Main sources of data are 
+	1. USGS daily flow (discharge) data from gauging station 04199155
+	2. OWC on-site meteorological monitoring data
+	3. OWC-Lake Erie connection monitoring data
+	4. OWC water quality monitoring data for water depth
+	
+## Data and Data processing
+
+Reading and processing barrier beach opning status data
+```{r}
+MouthOC <- read.csv(paste(dataDIR, 'MOUTH.OC.1981.21518.csv', sep="/"))
+
+#Organizing table colums from original data set. Column 1 = mouth open
+#or closed (open = 1, closed = 0). Column 2 is reorganizing the date.
+nrs <- dim(MouthOC)[1]
+ncs <- dim(MouthOC)[2]
+OpnCls <- unlist(MouthOC[,3:ncs], use.name = F)
+mnth <- rep(MouthOC$Month, ncs - 2)
+mnth <- as.numeric(ordered(mnth, levels = month.name))
+dy <- rep(MouthOC$Day, ncs - 2)
+year <- rep(names(MouthOC)[3:ncs], each = nrs)
+year <- substring(year, 2,5)
+
+MouthOpC <- data.frame(open = OpnCls,
+                      date = as.Date(paste(mnth, dy, year, sep = "/"),
+                                     format = "%m/%d/%Y"))
+
+#Now we need to insert the depth and flow columns from the OL dataset.
+#Read data into R
+
+#Read in OL data to R
+Olcsv <- read.csv(paste(dataDIR, "OWCOLWQ1.csv", sep="/"), skip = 2) 
+Olcsv$date <- as.Date(as.character(Olcsv$DateTimeStamp),
+                      format="%m/%d/%y %H:%M")
+
+#Read in USGS flow data to R
+USGSflow <- read.csv(paste(dataDIR, "USGSflowBR.txt", sep="/"),
+                     skip = 29, sep='')
+USGSflow$date <- as.Date(as.character(USGSflow$datetime), format="%Y-%m-%d")
+
+##Berlin for flow, OL for depth
+
+##Combine files together into 1 dataframe
+##First change columns names to organaize the
+##Merge by date
+OWCFlowDepth <- merge(MouthOpC, Olcsv, by = "date", all = TRUE)
+OWCFlowDepth <- merge(OWCFlowDepth, USGSflow, by ="date", all = TRUE)
+colnames(OWCFlowDepth)[colnames(OWCFlowDepth)=="X109528_00060_00003"] <-
+    "USGSFlow" 
+OWCFlowDepth$USGSFlow <- as.character(OWCFlowDepth$USGSFlow) 
+#Remove and change 'Ice' to NA
+OWCFlowDepth$USGSFlow[OWCFlowDepth$USGSFlow == "Ice"] <- NA
+OWCFlowDepth$USGSFlow <-as.numeric(OWCFlowDepth$USGSFlow) 
+
+
+#Melt and Cast 
+#Reshaping data to calculate daily averages 
+
+#Melt to new dataframe
+OWCMelt <- melt(OWCFlowDepth[,c("date", "USGSFlow", "open", "Depth")],
+               id = "date")
+head(OWCMelt)
+ 
+#Cast to appear with daily averages
+OWCcast <- dcast(OWCMelt, date ~ variable, mean)
+head(OWCcast)
+
+```
+
+## Exploratory Data Analysis
+
+Exploratory plots for potential predictors and transformation
+```{r}
+#Log Flow&Depth, open/ closed panels with all years
+xyplot(log(Depth) ~ log(USGSFlow) | factor(open), data = OWCcast)
+
+xyplot(Depth ~ USGSFlow | factor(open), data = OWCFlowDepth,
+       main = "Flow and Depth measurements")
+
+## there are negative depths and depth > 5
+```
+
+### Weather Data
+```{r}
+#Inserting Weather data. Starts 2001 till now
+OWCmet <- read.csv(paste(dataDIR, "OWCOWMET1.csv", sep="/"), skip = 2)
+OWCmet$date <- as.Date(as.character(OWCmet$DateTimeStamp),
+                       format="%m/%d/%y %H:%M")
+
+#Melt and Cast to get daily averages and use only the variables needed
+#Melt to new dataframe
+ 
+OWCMetmelt <- melt(OWCmet, id = "date",
+                   measure = c("ATemp", "WSpd", "Wdir", "TotPAR", "TotPrcp"),
+                   na.rm=TRUE)
+head(OWCMetmelt)
+
+#BP and RH are read in as character instead of numeric
+
+#Cast to appear with daily averages
+OWCMetcast <- dcast(OWCMetmelt, date ~ variable, mean, na.rm=T)
+head(OWCMetcast)
+
+#Combine weather data with OWCFlowDepth and create a new dataframe with all that
+OWCHydroMet <- merge(OWCcast, OWCMetcast, by = "date", all = TRUE,
+                     na.rm = TRUE)
+#
+
+#Fixing for Depth and adding Months, Years, and Seasons column
+#Months Column
+OWCHydroMet$Month <- format(OWCHydroMet$date, "%b")
+
+#Years column
+OWCHydroMet$Year <- as.numeric(format(OWCHydroMet$date, "%Y"))
+
+#Removing the NA in year
+OWCHydroMet <- OWCHydroMet[!is.na(OWCHydroMet$Year),]
+
+#Seasons Column
+OWCHydroMet$Season <- "Winter"
+
+OWCHydroMet$Season[OWCHydroMet$Month=="Mar"|
+            OWCHydroMet$Month=="Apr"| 
+            OWCHydroMet$Month=="May"]="Spring"
+OWCHydroMet$Season[OWCHydroMet$Month=="Jun"|
+            OWCHydroMet$Month=="Jul"| 
+            OWCHydroMet$Month=="Aug"]="Summer"
+OWCHydroMet$Season[OWCHydroMet$Month=="Sep"|
+            OWCHydroMet$Month=="Oct"| 
+            OWCHydroMet$Month=="Nov"]="Fall"
+
+#Fixing Depth
+OWCHydroMet$Depth[OWCHydroMet$Year == 2008] <-
+    OWCHydroMet$Depth[OWCHydroMet$Year == 2008] + .31
+OWCHydroMet$Depth[OWCHydroMet$Year > 2008] <-
+    OWCHydroMet$Depth[OWCHydroMet$Year > 2008] +.26
+
+#Depth cannot be greater than 5 m (16.2 ft)
+OWCHydroMet$Depth[OWCHydroMet$Depth > 5 | OWCHydroMet$Depth < 0] = NA
+
+```
+
+## Exploratory Plots
+```{r}
+pairs(log(Depth) ~USGSFlow + ATemp + WSpd + Wdir + TotPAR +TotPrcp,
+      data = OWCHydroMet)
+
+## 2007 to now
+pairs(log(Depth) ~USGSFlow + ATemp + WSpd + Wdir + TotPAR +TotPrcp,
+      data = OWCHydroMet[OWCHydroMet$Year > 2007,])
+
+
+xyplot(log(TotPrcp) ~ log(USGSFlow) | factor(open),
+       data = OWCHydroMet[OWCHydroMet$Year > 2007,])
+
+xyplot(TotPrcp ~ USGSFlow | factor(open),
+       data = OWCHydroMet[OWCHydroMet$Year > 2007,])
+
+xyplot(log(TotPrcp) ~ log(USGSFlow) | factor(open),
+       data = OWCHydroMet[OWCHydroMet$Year > 2007,])
+
+xyplot(log(USGSFlow)~ log(TotPrcp)  | factor(open),
+       data = OWCHydroMet[OWCHydroMet$Year > 2007,])
+```
+
+### Moving Average Function
+The following function calculates moving averages of a time series. 
+```{r}
+movingAverage <- function(x, n=1, centered=FALSE) {
+    if (centered) {
+        before <- floor  ((n-1)/2)
+        after  <- ceiling((n-1)/2)
+    } else {
+        before <- n-1
+        after  <- 0
+    }
+    
+    ## Track the sum and count of number of non-NA items
+    s     <- rep(0, length(x))
+    count <- rep(0, length(x))
+    
+    # Add the centered data 
+    new <- x
+    # Add to count list wherever there isn't a 
+    count <- count + !is.na(new)
+    # Now replace NA_s with 0_s and add to total
+    new[is.na(new)] <- 0
+    s <- s + new
+    
+    # Add the data from before
+    i <- 1
+    while (i <= before) {
+        # This is the vector with offset values to add
+        new   <- c(rep(NA, i), x[1:(length(x)-i)])
+
+        count <- count + !is.na(new)
+        new[is.na(new)] <- 0
+        s <- s + new
+        
+        i <- i+1
+    }
+
+    # Add the data from after
+    i <- 1
+    while (i <= after) {
+        # This is the vector with offset values to add
+        new   <- c(x[(i+1):length(x)], rep(NA, i))
+       
+        count <- count + !is.na(new)
+        new[is.na(new)] <- 0
+        s <- s + new
+        
+        i <- i+1
+    }
+    
+    # return sum divided by count
+    s/count
+}
+```
+
+Using the moving average function, we now create Columns of moving
+averages for Precip, Radiation, Flow, and Air Temp.
+```{r}
+#Precip moving average
+OWCHydroMet$maPrcp10 <- movingAverage(OWCHydroMet$TotPrcp, 10)
+OWCHydroMet$maPrcp20 <- movingAverage(OWCHydroMet$TotPrcp, 20)
+OWCHydroMet$maPrcp30 <- movingAverage(OWCHydroMet$TotPrcp, 30)
+
+#Radiation moving average
+OWCHydroMet$maRad10 <- movingAverage(OWCHydroMet$TotPAR, 10)
+OWCHydroMet$maRad20 <- movingAverage(OWCHydroMet$TotPAR, 20)
+OWCHydroMet$maRad30 <- movingAverage(OWCHydroMet$TotPAR, 30)
+
+#USGSFlow moving average 
+OWCHydroMet$maFlow10 <- movingAverage(OWCHydroMet$USGSFlow, 10)
+OWCHydroMet$maFlow20 <- movingAverage(OWCHydroMet$USGSFlow, 20)
+OWCHydroMet$maFlow30 <- movingAverage(OWCHydroMet$USGSFlow, 30)
+
+#Temp moving average
+OWCHydroMet$maTemp10 <- movingAverage(OWCHydroMet$ATemp, 10)
+OWCHydroMet$maTemp20 <- movingAverage(OWCHydroMet$ATemp, 20)
+OWCHydroMet$maTemp30 <- movingAverage(OWCHydroMet$ATemp, 30)
+
+#Now OWCHydroMet has all these new moving avergae columns
+
+```
+
+Exploring season effects:
+```{r}
+#Depth v log(Flow) by Seasons, CLOSED mouth
+xyplot(Depth ~ log(USGSFlow) | Season, subset = open==0,
+       data = OWCHydroMet[OWCHydroMet$Year > 2007,])
+
+#############
+xyplot(Depth ~ log(USGSFlow) | Season * factor(open),
+       data = OWCHydroMet[OWCHydroMet$Year > 2007 & OWCHydroMet$Depth > 0 ,])
+
+#OPEN mouth
+xyplot(Depth ~ log(USGSFlow) | Season, subset = open==1,
+       data = OWCHydroMet[OWCHydroMet$Year > 2007,])
+
+#Depth v Precip by Seasons CLOSED mouth
+xyplot(Depth ~ TotPrcp | Season, subset = open ==0,
+       data = OWCHydroMet[OWCHydroMet$Year > 2007,])
+
+#OPEN mouth
+xyplot(Depth ~ TotPrcp | Season, subset = open ==1,
+       data = OWCHydroMet[OWCHydroMet$Year > 2007,])
+
+#Depth v Radiation by Seasons CLOSED mouth
+xyplot(Depth ~ TotPAR | Season, subset = open ==0,
+       data = OWCHydroMet[OWCHydroMet$Year > 2007,])
+
+#OPEN mouth
+xyplot(Depth ~ TotPAR | Season, subset = open ==1,
+       data = OWCHydroMet[OWCHydroMet$Year > 2007,])
+
+#Depth v Air Temp by Seasons ClOSED mouth
+xyplot(Depth ~ ATemp | Season, subset = open ==0,
+       data = OWCHydroMet[OWCHydroMet$Year > 2007,])
+
+#OPEN mouth
+xyplot(Depth ~ ATemp | Season, subset = open ==1,
+       data = OWCHydroMet)
+
+#Precip Plots
+
+plot(Depth~maPrcp10, data = OWCHydroMet)
+plot(Depth~maPrcp20, data = OWCHydroMet)
+plot(Depth~maPrcp30, data = OWCHydroMet) 
+
+#Flow
+plot(Depth ~ maFlow10, data = OWCHydroMet)
+plot(Depth ~ maFlow20, data = OWCHydroMet)
+plot(Depth ~ maFlow30, data = OWCHydroMet) 
+
+
+#RAD
+plot(Depth ~ maRad10, data = OWCHydroMet)
+plot(Depth ~ maRad20, data = OWCHydroMet)
+plot(Depth ~ maRad30, data = OWCHydroMet) 
+
+#Air Temp
+plot(Depth ~ maTemp10, data = OWCHydroMet)
+plot(Depth ~ maTemp20, data = OWCHydroMet)
+plot(Depth ~ maTemp30, data = OWCHydroMet) 
+
+
+xyplot(Depth~log(maFlow10) | Season * factor(open),
+       data = OWCHydroMet)
+
+xyplot(Depth~log(maFlow30) | Season * factor(open),
+       data = OWCHydroMet)
+
+xyplot(log(Depth)~log(USGSFlow) | Season * factor(open), data = OWCHydroMet)
+
+
+xyplot(Depth~log(maFlow10) | Season * factor(open),
+       data = OWCHydroMet[OWCHydroMet$Year > 2007,])
+xyplot(Depth~log(maFlow20) | Season * factor(open),
+       data = OWCHydroMet[OWCHydroMet$Year > 2007,])
+xyplot(Depth~log(maFlow30) | Season * factor(open),
+       data = OWCHydroMet[OWCHydroMet$Year > 2007,])
+
+
+xyplot(Depth~log(USGSFlow) | Season * factor(open),
+       data = OWCHydroMet[OWCHydroMet$Year > 2007,])
+xyplot(Depth~log(USGSFlow) | Season * factor(open),
+       data = OWCHydroMet[OWCHydroMet$Year > 2007,])
+
+##PRCP
+
+xyplot(Depth~log(maPrcp10) | Season * factor(open),
+       data = OWCHydroMet[OWCHydroMet$Year > 2007, ])
+xyplot(Depth~log(maPrcp20) | Season * factor(open),
+       data = OWCHydroMet[OWCHydroMet$Year > 2007, ])
+xyplot(Depth~log(maPrcp30) | Season * factor(open),
+       data = OWCHydroMet[OWCHydroMet$Year > 2007, ])
+
+##RAD
+xyplot(Depth~log(maRad10) | Season * factor(open),
+       data = OWCHydroMet[OWCHydroMet$Year > 2007, ])
+xyplot(Depth~log(maRad20) | Season * factor(open),
+       data = OWCHydroMet[OWCHydroMet$Year > 2007, ])
+xyplot(Depth~log(maRad30) | Season * factor(open),
+       data = OWCHydroMet[OWCHydroMet$Year > 2007, ])
+
+##TEMP
+xyplot(Depth~log(maTemp10) | Season * factor(open),
+       data = OWCHydroMet[OWCHydroMet$Year > 2007, ])
+xyplot(Depth~log(maTemp20) | Season * factor(open),
+       data = OWCHydroMet[OWCHydroMet$Year > 2007, ])
+xyplot(Depth~log(maTemp30) | Season * factor(open),
+       data = OWCHydroMet[OWCHydroMet$Year > 2007, ])
+```
+
+
+## Exploring Model Forms
+
+Linear regression models are fit and compared. 
+```{r}
+#All variables
+OWClm <- lm(log(Depth) ~ maFlow10 + maRad10 + maPrcp10 + maTemp10 +
+                maFlow20 +maRad20 +maPrcp20+ maTemp20 + maFlow30 +
+                maTemp30 + maPrcp30 + maRad30 + USGSFlow,
+             data = OWCHydroMet[OWCHydroMet$Year > 2007 &
+                                OWCHydroMet$Depth > 0 &
+                                OWCHydroMet$Depth< 3.6 &
+                                OWCHydroMet$maFlow10 > 0,])
+summary(OWClm)
+
+lm.plots(OWClm)
+
+## removing least significant predictors
+OWClm1 =lm(log(Depth) ~ maFlow10 + maRad10 + maTemp10 + maFlow20 +
+               maRad20 + maTemp20 + maFlow30 + maTemp30 + maPrcp30 +
+               maRad30 +USGSFlow,
+             data = OWCHydroMet[OWCHydroMet$Year > 2007 &
+                                OWCHydroMet$Depth > 0 &
+                                OWCHydroMet$Depth< 3.6 &
+                                OWCHydroMet$maFlow10 > 0,])
+summary(OWClm1)
+lm.plots(OWClm1)
+
+OWClm2 = lm(log(Depth) ~maFlow10 + maRad10 + maTemp10 + maFlow20 +
+                maRad20 + maTemp20 + maTemp30 + maPrcp30 + maRad30 +
+                USGSFlow,
+             data = OWCHydroMet[OWCHydroMet$Year > 2007 &
+                                OWCHydroMet$Depth > 0 &
+                                OWCHydroMet$Depth< 3.6 &
+                                OWCHydroMet$maFlow10 > 0,])
+summary(OWClm2)
+
+OWClm3 = lm(log(Depth) ~maFlow10 + maRad10 + maFlow20 +maRad20 +
+                maTemp20 + maTemp30 + maPrcp30 + maRad30 +USGSFlow,
+             data = OWCHydroMet[OWCHydroMet$Year > 2007 &
+                                OWCHydroMet$Depth > 0 &
+                                OWCHydroMet$Depth< 3.6 &
+                                OWCHydroMet$maFlow10 > 0,])
+summary(OWClm3)
+
+
+OWClm4 =  lm(log(Depth) ~maFlow10 + maRad10 +maRad20 + maTemp20 +
+                 maTemp30 + maPrcp30 + maRad30 +USGSFlow,
+             data = OWCHydroMet[OWCHydroMet$Year > 2007 &
+                                OWCHydroMet$Depth > 0 &
+                                OWCHydroMet$Depth< 3.6 &
+                                OWCHydroMet$maFlow10 > 0,])
+summary(OWClm4)
+
+OWClm5 = lm(log(Depth) ~maFlow10 + maRad10 + maTemp20 + maTemp30 +
+                maPrcp30 + maRad30 +USGSFlow,
+             data = OWCHydroMet[OWCHydroMet$Year > 2007 &
+                                OWCHydroMet$Depth > 0 &
+                                OWCHydroMet$Depth< 3.6 &
+                                OWCHydroMet$maFlow10 > 0,])
+summary(OWClm5)
+
+OWClm6 = lm(log(Depth) ~maFlow10 + maRad10 + maTemp20 + maTemp30 +
+                maPrcp30 + maRad30,
+             data = OWCHydroMet[OWCHydroMet$Year > 2007 &
+                                OWCHydroMet$Depth > 0 &
+                                OWCHydroMet$Depth< 3.6 &
+                                OWCHydroMet$maFlow10 > 0,])
+summary(OWClm6)
+
+OWClm7 = lm(log(Depth) ~maFlow10 + maRad10 + maTemp20 +
+                maTemp30 + log(maPrcp30) + maRad30,
+             data = OWCHydroMet[OWCHydroMet$Year > 2007 &
+                                OWCHydroMet$Depth > 0 &
+                                OWCHydroMet$Depth< 3.6 &
+                                OWCHydroMet$maFlow10 > 0,])
+summary(OWClm7)
+
+OWClm8 = lm(log(Depth) ~log(maFlow10) + maRad10 + maTemp20 +
+                maTemp30 + log(maPrcp30) + maRad30,
+             data = OWCHydroMet[OWCHydroMet$Year > 2007 &
+                                OWCHydroMet$Depth > 0 &
+                                OWCHydroMet$Depth< 3.6 &
+                                OWCHydroMet$maFlow10 > 0,])
+summary(OWClm8)
+
+## add interaction
+OWClm9 = lm(log(Depth) ~ log(maFlow10) + maRad10 + maTemp20 +
+                maTemp30 + log(maPrcp30) + maRad30 +
+                log(maPrcp30):log(maFlow10),
+             data = OWCHydroMet[OWCHydroMet$Year > 2007 &
+                                OWCHydroMet$Depth > 0 &
+                                OWCHydroMet$Depth< 3.6 &
+                                OWCHydroMet$maFlow10 > 0,])
+summary(OWClm9)
+
+##
+OWClm10 = lm(log(Depth) ~ log(maFlow10) + maRad10 + maTemp30 +
+                 log(maPrcp30) +log(maPrcp30):log(maFlow10) ,
+             data = OWCHydroMet[OWCHydroMet$Year > 2007 &
+                                OWCHydroMet$Depth > 0 &
+                                OWCHydroMet$Depth< 3.6 &
+                                OWCHydroMet$maFlow10 > 0,])
+summary(OWClm10)
+
+## additive "open"
+OWClm11 = lm(log(Depth) ~ log(maFlow10) + maRad10 + maTemp30 +
+                 log(maPrcp30) +log(maPrcp30):log(maFlow10)+ open ,
+             data = OWCHydroMet[OWCHydroMet$Year > 2007 &
+                                OWCHydroMet$Depth > 0 &
+                                OWCHydroMet$Depth< 3.6 &
+                                OWCHydroMet$maFlow10 > 0,])
+summary(OWClm11)
+
+## interactive "open"
+OWClm12 = lm(log(Depth) ~ open *log(maFlow10) + open *maRad10 + open*maTemp30 +
+                 open*log(maPrcp30) + log(maPrcp30):log(maFlow10) +
+                 open:log(maPrcp30):log(maFlow10),
+             data = OWCHydroMet[OWCHydroMet$Year > 2007 &
+                                OWCHydroMet$Depth > 0 &
+                                OWCHydroMet$Depth< 3.6 &
+                                OWCHydroMet$maFlow10 > 0,])
+summary(OWClm12)
+
+## additive season
+OWClm14 = lm(log(Depth) ~ Season + open *log(maFlow10) + open *maRad10 +
+                 open*maTemp30 + open*log(maPrcp30) +
+                 log(maPrcp30):log(maFlow10)+ open:log(maPrcp30):log(maFlow10),
+             data = OWCHydroMet[OWCHydroMet$Year > 2007 &
+                                OWCHydroMet$Depth > 0 &
+                                OWCHydroMet$Depth< 3.6 &
+                                OWCHydroMet$maFlow10 > 0,])
+summary(OWClm14)
+
+## removing insignificant interaction
+OWClm12.1 = lm(log(Depth) ~ open * log(maFlow10) *log(maPrcp30) +
+                   open * maTemp30 + open *maRad10,
+             data = OWCHydroMet[OWCHydroMet$Year > 2007 &
+                                OWCHydroMet$Depth > 0 &
+                                OWCHydroMet$Depth< 3.6 &
+                                OWCHydroMet$maFlow10 > 0,])
+summary(OWClm12.1)
+
+OWClm14.1 = lm(log(Depth) ~ Season + open * log(maFlow10) *log(maPrcp30) +
+                   open * maTemp30 + open *maRad10,
+               data = OWCHydroMet[OWCHydroMet$Year > 2007 &
+                                  OWCHydroMet$Depth > 0 &
+                                  OWCHydroMet$Depth< 3.6 &
+                                  OWCHydroMet$maFlow10 > 0,])
+
+summary(OWClm14.1)
+
+#Replace OPEN w/ SEASON
+### MODEL 15 ###  (Model 12 replaced with season)
+OWClm15 = lm(log(Depth) ~ Season * log(maFlow10) *log(maPrcp30) +
+                 Season * maTemp30 + Season *maRad10,
+             data = OWCHydroMet[OWCHydroMet$Year > 2007 &
+                                OWCHydroMet$Depth > 0 &
+                                OWCHydroMet$Depth< 3.6 &
+                                OWCHydroMet$maFlow10 > 0,])
+summary(OWClm15)
+
+```
+
+These models suggest that the final model should include both "open"
+and "season" as factor variables.
+```{r}
+### Season and Open
+OWClm16 = lm(log(Depth) ~ open * log(maFlow10) *log(maPrcp30) + 
+               open * maTemp30 + 
+               open * maRad10 + 
+               Season * log(maFlow10) *log(maPrcp30) + 
+               Season * maTemp30 + 
+               Season * maRad10, 
+             data = OWCHydroMet[OWCHydroMet$Year > 2007 &
+                                OWCHydroMet$Depth > 0 &
+                                OWCHydroMet$Depth< 3.6 &
+                                OWCHydroMet$maFlow10 > 0,])
+summary(OWClm16)
+lm.plots(OWClm16)
+```
+
+The final model explains 33\% of the total variation in log depth. It
+includes four 
+
+## Predictive Model Example
+```{r}
+
+#Average Dataframe for prediction 
+pred.data <- data.frame(open = rep(c(0,1), each= 4), 
+                       Season = rep(c("Spring", "Summer", "Fall",
+                                      "Winter"),2), 
+                       maFlow10 = rep(mean(OWCHydroMet$maFlow10,
+                                           na.rm = TRUE),8),
+                       maPrcp30 = rep(mean(OWCHydroMet$maPrcp30,
+                                           na.rm = TRUE),8), 
+                       maTemp30 = rep(mean(OWCHydroMet$maTemp30,
+                                           na.rm = TRUE),8), 
+                       maRad10 = rep(mean(OWCHydroMet$maRad10,
+                                          na.rm = TRUE), 8))
+
+average.examp <- predict(OWClm16, new=pred.data, se.fit = TRUE,
+                         interval = "prediction")$fit
+cbind(pred.data, exp(average.examp))
+
+```
+The predictions suggest that the model is not accurate in predicting
+winter depth
+
