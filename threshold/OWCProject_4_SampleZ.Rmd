@@ -1,0 +1,511 @@
+---
+title: "Old Woman Creek Project -- Bayesian Models "
+author: "Song Qian"
+date: "March 11, 2019"
+output: pdf_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# Introduction 
+
+This Rmd file includes Bayesian updating code for the Old Woman Creek project. Data used include daily monitoring data from Old Woman Creek (divided into four seasons), Crane Creek, Coldwater Creek, and Olentangy.  The code in the previous Rmd files generate necessary input data and prior distributions for model parameters. 
+
+```{r setup, include=FALSE}
+## functions and setup
+to2 <- function(x){
+    ## conver a single digit integer to 0x
+    return(ifelse (x<10, paste("0",x, sep=""), as.character(x)))
+}
+
+hockey_smooth <- function(x, beta0, beta1=0, delta, phi, theta=NULL)
+{
+    if (is.null(theta)) theta=0.01*diff(range(x))
+    return(beta0 + beta1 * (x-phi) +
+           delta * theta * log1p(exp((x-phi)/theta)))
+}
+
+line.plots <- function(est, se, Ylabel, Xlab, yaxis=2, Xlim=NULL,
+                       rscale=F, At=NULL, Lab=NULL, V=0){
+    if (is.null(Xlim)) Xlim <- range(c(est+2*se, est-2*se))
+    n <- length(est)
+    if(n != length(se))stop("lengths not match")
+    plot(1:n, 1:n, xlim=Xlim, ylim=c(0.75, n+0.25),
+         type="n", axes=F, xlab=Xlab, ylab="")
+    if (rscale)
+        axis(1, at=At, labels=Lab)
+    else
+        axis(1)
+    axis(yaxis, at=1:n, labels=Ylabel, las=1)
+    segments(y0=1:n, y1=1:n, x0=est-2*se, x1=est+2*se)
+    segments(y0=1:n, y1=1:n, x0=est-1*se, x1=est+1*se, lwd=2.5)
+    points(est, 1:n)
+    if (!is.null(V)) abline(v=V, col="gray")
+    invisible()
+}
+
+packages<-function(x, repos="http://cran.r-project.org", ...){
+    x<-as.character(match.call()[[2]])
+    if (!require(x,character.only=TRUE)){
+        install.packages(pkgs=x, repos=repos, ...)
+        require(x,character.only=TRUE)
+    }
+}
+
+packages(tidyverse)
+
+packages(ggplot2)
+packages(rv)
+packages(arm)
+packages(lattice)
+packages(tikzDevice)
+packages(car)
+packages(formatR)
+packages(rstan)
+
+rstan_options(auto_write = TRUE)
+options(mc.cores = min(c(parallel::detectCores(), 8)))
+
+nchains <-  min(c(parallel::detectCores(), 8))
+niters <- 100000
+nkeep <- 2500
+nthin <- ceiling((niters/2)*nchains/nkeep)
+
+```
+## Importing Data
+
+
+```{r read}
+base <- getwd()
+dataDIR <- paste(base, "Data", sep="/")
+
+load("owc_data.RData")
+
+```
+
+Prior function from previous Rmd file
+
+```{r}
+## using the hierarchcial mdoel for the prior
+
+prior <- function(fit, b0="B0", de="De", ph="Ph",
+                  s0="sigma0",sD="sigmaD",sP="sigmaP",
+                  n0=20, setn0=F){
+    fit2SNprior <- rvsims(as.matrix(as.data.frame(rstan::extract(fit, permute=T))))
+    
+    tmp <- summary(fit2SNprior[names(fit2SNprior)==b0])
+    Eb0 <- tmp$mean
+    Vb0 <- tmp$sd^2
+    
+    tmp <- summary(fit2SNprior[names(fit2SNprior)==de])
+    EDe <- tmp$mean
+    VDe <- tmp$sd^2
+    
+    tmp <- summary(fit2SNprior[names(fit2SNprior)==ph])
+    EPh <- tmp$mean
+    VPh <- tmp$sd^2
+    
+    tmp <- summary(fit2SNprior[names(fit2SNprior)==s0]^2)
+    Esigma0 <- tmp$mean
+    Vsigma0 <- tmp$sd^2
+    
+    tmp <- summary(fit2SNprior[names(fit2SNprior)==sD]^2)
+    EsigmaD <- tmp$mean
+    VsigmaD <- tmp$sd^2
+    
+    tmp <- summary(fit2SNprior[names(fit2SNprior)==sP]^2)
+    EsigmaP <- tmp$mean
+    VsigmaP <- tmp$sd^2
+
+    if (setn0) {
+        alpha0 <- n0+1
+        alphaD <- n0+1
+        alphaP <- n0+1
+    } else {
+        alpha0 <- 2+Esigma0/Vsigma0
+        alphaD <- 2+Esigma0/VsigmaD
+        alphaP <- 2+Esigma0/VsigmaP
+    }
+    beta0 <- Esigma0*(alpha0-1)
+    betaD <- EsigmaD*(alphaD-1)
+    betaP <- EsigmaP*(alphaP-1)
+    lambda0 <- Esigma0/Vb0
+    lambdaD <- EsigmaD/VDe
+    lambdaP <- EsigmaP/VPh
+    ## limiting alpha + beta to be less than 1000
+    while (alpha0+beta0 > 1000){
+      alpha0 <- alpha0/10
+      beta0 <- beta0/10
+    }
+    while (alphaD+betaD > 1000){
+      alphaD <- alphaD/10
+      betaD <- betaD/10
+    }
+    while (alphaP+betaP > 1000){
+      alphaP <- alphaP/10
+      betaP <- betaP/10
+    }
+    return(list(m0=Eb0, mD=EDe, mP=EPh,
+                lmbd0=lambda0, lmbdD=lambdaD, lmbdP=lambdaP,
+                al0=alpha0, alP=alphaP, alD=alphaD,
+                bt0=beta0, btP=betaP, btD=betaD))
+}
+
+```
+
+### Revised hockey stick model
+
+The Stan model now includes a hyper-parameter for each model coefficients:
+
+```{r}
+stan_model3 <- "
+	  data{
+	  int N; //the number of observations
+	  vector[N] y; //the response
+	  vector[N] x; 
+
+	  real theta;
+          real beta1;
+
+          real m0;
+          real mD;
+          real mP;
+
+          real lmbd0;
+          real lmbdD;
+          real lmbdP;
+
+          real al0;
+          real alP;
+          real alD;
+
+          real bt0;
+          real btP;
+          real btD;
+
+	}
+	parameters {
+	  real beta0; //the regression parameters
+	  real<lower=0> delta;
+	  real phi; //change point
+
+	  real<lower=0> sigma;
+
+    real mu0;
+    real muD;
+    real muP;
+
+	  real<lower=0> sigma0sq;
+	  real<lower=0> sigmaDsq;
+	  real<lower=0> sigmaPsq;
+	}
+	transformed parameters {
+	  vector[N] mu;
+	  real<lower=0> sigma0;
+	  real<lower=0> sigmaD;
+	  real<lower=0> sigmaP;
+	  
+    sigma0 = sqrt(sigma0sq);
+    sigmaD = sqrt(sigmaDsq);
+    sigmaP = sqrt(sigmaPsq);
+	  for (i in 1:N)
+	    mu[i] = beta0 + beta1 * (x[i]-phi) +
+		    delta * theta *
+			    log1p(exp((x[i]-phi)/theta));
+	}
+	model {  
+	  sigma ~ cauchy(0, 1)  ;
+	  sigma0sq ~ inv_gamma(al0, bt0);
+	  sigmaDsq ~ inv_gamma(alD, btD);
+	  sigmaPsq ~ inv_gamma(alP, btP);
+       
+    mu0 ~ normal(m0, sigma0/sqrt(lmbd0));
+    muD ~ normal(mD, sigmaD/sqrt(lmbdD));
+    muP ~ normal(mP, sigmaP/sqrt(lmbdP));
+          
+	  phi ~ normal(muP, sigmaP); 
+	  beta0 ~ normal(mu0, sigma0); 
+	  delta ~ normal(muD, sigmaD); 
+
+	  y ~ normal(mu, sigma);
+	}
+"
+
+stan.in2 <- function(infile=owc_daily, x="maTPLD05", y="TP_ef",
+                     grp=owc_daily$Quarter=="Q1", n.chains=4,
+                     stdz=T,info=F, prrs = NULL){
+    if (info & is.null(prrs)) stop("Need informative priors")
+    infile <- infile[grp,]
+    keep <- (infile[,x] > 0) & (infile[,y] >0)
+    infile <- infile[keep & !is.na(keep),]
+    x <- log(infile[,x])
+    if (stdz){
+      xmu <- mean(x, na.rm=T)
+      xsd <- sd(x, na.rm=T)
+      x <- (x - xmu)/xsd
+    } else {
+      xmu <- 0
+      xsd <- 1
+    }
+    y <- log(infile[,y])
+    n <- dim(infile)[1]
+    if (info){
+        m0 = prrs$m0
+        mD = prrs$mD
+        mP = prrs$mP
+        lmbd0=prrs$lmbd0
+        lmbdD=prrs$lmbdD
+        lmbdP=prrs$lmbdP
+        al0=prrs$al0
+        alP=prrs$alP
+        alD=prrs$alD
+        bt0=prrs$bt0
+        btP=prrs$btP
+        btD=prrs$btD
+    }else{
+        m0 = 0
+        mD = 0
+        mP = 0
+        lmbd0=1
+        lmbdD=1
+        lmbdP=1
+        al0=2
+        alP=2
+        alD=2
+        bt0=2
+        btP=2
+        btD=2
+    }
+
+    s0 <- sqrt(bt0/(al0-1))
+    sD <- sqrt(btD/(alD-1))
+    sP <- sqrt(btP/(alP-1))
+    
+    inits <- list()
+    if (stdz) theta <- 0.04
+    else theta <- 0.01*diff(range(x))
+    bugs.data <- list(N=n, y=y, x=x,
+                      theta=theta, beta1=0,
+                      m0 = m0,  mD = mD, mP = mP,
+                      lmbd0=lmbd0, lmbdD=lmbdD, lmbdP=lmbdP,
+                      al0=al0, alP=alP, alD=alD,
+                      bt0=bt0, btP=btP, btD=btD )
+    for (i in 1:n.chains)
+	inits[[i]] <- list(beta0=rnorm(1, m0, s0),
+	                   delta=rnorm(1,mD,sD),
+			   phi=runif(1, range(x)[1], range(x)[2]),
+			   sigma=runif(1), sigmaPsq=runif(1), sigmaDsq=runif(1),
+                           sigma0sq=runif(1),
+                           mu0=rnorm(1, m0,s0), 
+			   muD=rnorm(1, mD, sD),
+                             muP=rnorm(1, mP,sP))
+    para <- c("beta0", "delta", "phi","sigma",
+              "mu0","muD","muP", "sigma0","sigmaD","sigmaP"
+              )
+    return(list(para=para, data=bugs.data, inits=inits,n.chains=n.chains,
+                mux=xmu, sdx=xsd))
+}
+
+load("owcTPma05SeasonSTDZ.RData")
+fit2coefSN <- rvsims(as.matrix(as.data.frame(rstan::extract(fit2, permuted=T))))
+
+prr <- prior(fit2)
+
+```
+# Bayesian Sample Size Estimation
+
+Using Monte Carlo simulation, we draw random samples of various sizes based on existing estimates of the hockey stick model parameters. For each set of samples, another model is fit to estimate model parameters.  The results will be presented as a plot of the estimated threshold (with its 90% credible interval) as a function of sample size.  We use the Coldwater Creek data as an example.
+
+```{r}
+## input file:
+stan.inSZ <- function(x, y, n.chains=4, prrs = prr, sz){
+        n <- length(x)
+        m0 = prrs$m0
+        mD = prrs$mD
+        mP = prrs$mP
+        lmbd0=prrs$lmbd0
+        lmbdD=prrs$lmbdD
+        lmbdP=prrs$lmbdP
+        al0=prrs$al0
+        alP=prrs$alP
+        alD=prrs$alD
+        bt0=prrs$bt0
+        btP=prrs$btP
+        btD=prrs$btD
+  
+        s0 <- sqrt(bt0/(al0-1))
+        sD <- sqrt(btD/(alD-1))
+        sP <- sqrt(btP/(alP-1))
+    
+        inits <- list()
+        theta <- 0.04
+        bugs.data <- list(N=n, y=y, x=x,
+                          theta=theta, beta1=0,
+                          m0 = m0,  mD = mD, mP = mP,
+                          lmbd0=lmbd0, lmbdD=lmbdD, lmbdP=lmbdP,
+                          al0=al0, alP=alP, alD=alD,
+                          bt0=bt0, btP=btP, btD=btD )
+        for (i in 1:n.chains)
+        	inits[[i]] <- list(beta0=rnorm(1, m0, s0),
+	                           delta=runif(1),
+		 	                       phi=runif(1, range(x)[1], range(x)[2]),
+                    			   sigma=runif(1), sigmaPsq=runif(1),
+                        		 sigmaDsq=runif(1), sigma0sq=runif(1),
+                             mu0=rnorm(1, m0, s0), 
+                    			   muD=rnorm(1, mD,sD),
+                             muP=rnorm(1, mP, sP))
+    para <- c("beta0", "delta", "phi","sigma",
+              "mu0","muD","muP", "sigma0","sigmaD","sigmaP")
+    return(list(para=para, data=bugs.data,
+                inits=inits,n.chains=n.chains, sz=sz))
+}
+##cwc data
+tmp <- cwc_month$flow!=0
+load("ColdCreek_STDZ.RData")
+fitcoefCWC_temp <- summary(rvsims(as.matrix(as.data.frame(extract(fitCWC, permute=T))))) ## using standardized only
+fit <- stan_model(model_code = stan_model3)
+
+## sample size
+
+sim_sz <- function(n=12, k=100, stanmodel=fit, prior_coef=fitcoefCWC_temp){
+     fitcoefSZ_sim <- list(phi=rvsims(0), 
+                           beta0=rvsims(0), 
+                           delta=rvsims(0))
+     for (i in 1:k){
+        print(paste(i, "of", k, ", sample size =", n))
+        x <- rnorm(n)
+        mnY <- hockey_smooth(x, prior_coef[1,2] , 0,
+                                prior_coef[2,2] ,
+                                prior_coef[3,2] ,
+                                0.04)
+        y <- rnorm(n, mnY, prior_coef[4,2])
+
+        input.to.stan <- stan.inSZ(x, y, sz=n)
+        fit_sim <- sampling(fit, data = input.to.stan$data,   
+                            init = input.to.stan$inits,
+                            pars = input.to.stan$para,
+                            iter = niters, thin=nthin, 
+                            chains=input.to.stan$n.chains,
+                            control=list(adapt_delta = 0.99, 
+                                         max_treedepth=25))
+        temp_sim <-  rvsims(as.matrix(as.data.frame(extract(fit_sim, permute=T))))
+        fitcoefSZ_sim$beta0 <- fitcoefSZ_sim$beta0 + temp_sim[1]/k
+        fitcoefSZ_sim$delta <- fitcoefSZ_sim$delta + temp_sim[2]/k
+        fitcoefSZ_sim$phi <- fitcoefSZ_sim$phi + temp_sim[3]/k
+     }
+     return(fitcoefSZ_sim)
+}
+
+n <- (1:10)*12
+
+smplsz_sim <- list()
+for (j in 1:4)
+  smplsz_sim[[j]] <- sim_sz(n=n[j])
+
+for (j in 5:6)
+  smplsz_sim[[j]] <- sim_sz(n=n[j])
+
+for (j in 7:8)
+  smplsz_sim[[j]] <- sim_sz(n=n[j])
+
+for (j in 9:10)
+  smplsz_sim[[j]] <- sim_sz(n=n[j])
+
+save(smplsz_sim, file="CWC_SZ_sim.RData")
+load("CWC_SZ_sim.RData")
+
+```
+
+Results are presented graphically by comparing the estimated model coefficients, especially the estimated threshold.
+
+```{r}
+j=0
+sim_plot_phi <- NULL
+for (i in n) {
+  j=j+1
+  sim_plot_phi <- rbind(sim_plot_phi, c(i, unlist(summary(smplsz_sim[[j]]$phi))))
+}
+sim_plot_phi <- as.data.frame(sim_plot_phi)
+
+j=0
+sim_plot_beta0 <- NULL
+for (i in n) {
+  j=j+1
+  sim_plot_beta0 <- rbind(sim_plot_beta0, c(i, unlist(summary(smplsz_sim[[j]]$beta0))))
+}
+sim_plot_beta0 <- as.data.frame(sim_plot_beta0)
+
+j=0
+sim_plot_delta <- NULL
+for (i in n) {
+  j=j+1
+  sim_plot_delta <- rbind(sim_plot_delta, c(i, unlist(summary(smplsz_sim[[j]]$delta))))
+}
+sim_plot_delta <- as.data.frame(sim_plot_delta)
+
+tikz(file="sz_sim.tex", width=6, height=4, standAlone=F)
+par(mfrow=c(1,3), mar=c(4, 4, 1, 1), mgp=c(1.25,0.125, 0), 
+    las=1, tck=0.01)
+line.plots(sim_plot_phi$mean, sim_plot_phi$sd, 
+           Xlab="Threshold (ton/yr)",
+           Ylabel=sim_plot_phi[,1],
+           rscale=T,
+           At=log(seq(0.3, 0.8, 0.1)),
+           Lab=as.character(seq(0.3,0.8,0.1)),
+           V=NULL)
+box()
+
+line.plots(sim_plot_beta0$mean, sim_plot_beta0$sd, 
+           Xlab="Intercept",
+           Ylabel=sim_plot_beta0[,1],
+           rscale=T,
+           V=NULL)
+box()
+
+line.plots(sim_plot_delta$mean, sim_plot_delta$sd, 
+           Xlab="Slope change",
+           Ylabel=sim_plot_delta[,1],
+           rscale=T,
+           V=NULL)
+box()
+
+dev.off()
+
+tikz(file="sz_simPhi.tex", width=3, height=4.75, standAlone=F)
+par(mar=c(4, 4, 1, 1), mgp=c(1.25,0.125, 0), 
+    las=1, tck=0.01)
+line.plots(sim_plot_phi$mean, sim_plot_phi$sd, 
+           Xlab="Threshold (ton/yr)",
+           Ylabel=sim_plot[,1],
+           rscale=T,
+           At=log(seq(0.3, 0.8, 0.1)),
+           Lab=as.character(seq(0.3,0.8,0.1)),
+           V=NULL)
+box()
+dev.off()
+
+tikz(file="sz_simBeta0.tex", width=3, height=4.75, standAlone=F)
+par(mar=c(4, 4, 1, 1), mgp=c(1.25,0.125, 0), 
+    las=1, tck=0.01)
+line.plots(sim_plot_beta0$mean, sim_plot_beta0$sd, 
+           Xlab="Intercept",
+           Ylabel=sim_plot[,1],
+           rscale=T,
+           V=NULL)
+box()
+dev.off()
+
+tikz(file="sz_simDelta.tex", width=3, height=4.75, standAlone=F)
+par(mar=c(4, 4, 1, 1), mgp=c(1.25,0.125, 0), 
+    las=1, tck=0.01)
+line.plots(sim_plot_delta$mean, sim_plot_delta$sd, 
+           Xlab="Slope Change",
+           Ylabel=sim_plot[,1],
+           rscale=T,
+           V=NULL)
+box()
+dev.off()
+
+
+```
+
