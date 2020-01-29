@@ -1,0 +1,597 @@
+---
+title: "Old Woman Creek Project -- Data Processing "
+author: "Song Qian"
+date: "March 11, 2019"
+output: pdf_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# Introduction 
+
+This file includes data processing code for the Old Woman Creek project. Data used include daily monitoring data from Old Woman Creek (divided into four seasons), three year intensive monitoring at Crane Creek, two phases of monitoring of Coldwater Creek wetland, and a long term data from Olentangy River Wetlands.  The R code organizes the input data into two main columns: input P loading and output P concentration, using necessary grouping variables (season, location, year, etc.).  
+
+The following code chunk includes small functions used in the project and loads necessary packages.
+```{r setup, include=FALSE}
+## functions and setup
+to2 <- function(x){
+    ## conver a single digit integer to 0x
+    return(ifelse (x<10, paste("0",x, sep=""), as.character(x)))
+}
+
+hockey_smooth <- function(x, beta0, beta1=0, delta, phi, theta=NULL)
+{
+    if (is.null(theta)) theta=0.01*diff(range(x))
+    return(beta0 + beta1 * (x-phi) +
+           delta * theta * log1p(exp((x-phi)/theta)))
+}
+
+
+movingAverage <- function(x, n=1, centered=FALSE) {
+    if (centered) {
+        before <- floor  ((n-1)/2)
+        after  <- ceiling((n-1)/2)
+    } else {
+        before <- n-1
+        after  <- 0
+    }
+    
+    ## Track the sum and count of number of non-NA items
+    s     <- rep(0, length(x))
+    count <- rep(0, length(x))
+    
+    # Add the centered data 
+    new <- x
+    # Add to count list wherever there isn't a 
+    count <- count + !is.na(new)
+    # Now replace NA_s with 0_s and add to total
+    new[is.na(new)] <- 0
+    s <- s + new
+    
+    # Add the data from before
+    i <- 1
+    while (i <= before) {
+        # This is the vector with offset values to add
+        new   <- c(rep(NA, i), x[1:(length(x)-i)])
+
+        count <- count + !is.na(new)
+        new[is.na(new)] <- 0
+        s <- s + new
+        
+        i <- i+1
+    }
+
+    # Add the data from after
+    i <- 1
+    while (i <= after) {
+        # This is the vector with offset values to add
+        new   <- c(x[(i+1):length(x)], rep(NA, i))
+       
+        count <- count + !is.na(new)
+        new[is.na(new)] <- 0
+        s <- s + new
+        
+        i <- i+1
+    }
+    
+    # return sum divided by count
+    s/count
+}
+
+line.plots <- function(est, se, Ylabel, Xlab, yaxis=2, Xlim=NULL,
+                       rscale=F, At=NULL, Lab=NULL, V=0){
+    if (is.null(Xlim)) Xlim <- range(c(est+2*se, est-2*se))
+    n <- length(est)
+    if(n != length(se))stop("lengths not match")
+    plot(1:n, 1:n, xlim=Xlim, ylim=c(0.75, n+0.25),
+         type="n", axes=F, xlab=Xlab, ylab="")
+    if (rscale)
+        axis(1, at=At, labels=Lab)
+    else
+        axis(1)
+    axis(yaxis, at=1:n, labels=Ylabel, las=1)
+    segments(y0=1:n, y1=1:n, x0=est-2*se, x1=est+2*se)
+    segments(y0=1:n, y1=1:n, x0=est-1*se, x1=est+1*se, lwd=2.5)
+    points(est, 1:n)
+    if (!is.null(V)) abline(v=V, col="gray")
+    invisible()
+}
+
+packages<-function(x, repos="http://cran.r-project.org", ...){
+    x<-as.character(match.call()[[2]])
+    if (!require(x,character.only=TRUE)){
+        install.packages(pkgs=x, repos=repos, ...)
+        require(x,character.only=TRUE)
+    }
+}
+
+packages(tidyverse)
+packages(readr)
+
+packages(rv)
+packages(arm)
+packages(lattice)
+packages(tikzDevice)
+packages(car)
+packages(formatR)
+
+```
+## Old Woman Creek Data
+
+Data files include water quality data from two monitoring sites (input at Berlin Road and output at site "OL"), USGS flow data, and a separate file on the OWC mouth status (open or closed).
+
+```{r read}
+base <- getwd()
+dataDIR <- paste(base, "Data", sep="/")
+
+## WQ data
+owc_br <- read_csv(paste(dataDIR, "BerlinOWCData.csv", sep="/"))
+names(owc_br) <- c("Date","Days","Time","Flow_in","SS_in","TP_in","SRP_in",
+                     "NO23_in", "TKN_in","Chloride_in","Sulfate_in","Silica_in",
+                     "Conductivity_in","Future","Month")          
+
+owc_ol <- read_csv(paste(dataDIR, "LakeOWCData.csv", sep="/"))
+names(owc_ol) <- c("Date","Days","Time","Flow_ef","SS_ef","TP_ef","SRP_ef",
+                     "NO23_ef", "TKN_ef","Chloride_ef","Sulfate_ef","Silica_ef",
+                     "Conductivity_ef","Future","Month")          
+
+
+owc_br$Date <- as.Date(owc_br$Date, format="%m/%d/%y %H:%M")
+owc_ol$Date <- as.Date(owc_ol$Date, format="%m/%d/%y %H:%M")
+
+owc_br[owc_br<0] <- NA
+owc_ol[owc_ol<0] <- NA
+
+## OWC mouth status
+MouthOC <- read.csv(paste(dataDIR, 'MOUTH.OC.1981.21518.csv', sep="/"))
+
+##Organizing table colums from original data set. Column 1 = mouth open
+##or closed (open = 1, closed = 0). Column 2 is reorganizing the date.
+nrs <- dim(MouthOC)[1]
+ncs <- dim(MouthOC)[2]
+OpnCls <- unlist(MouthOC[,3:ncs], use.name = F)
+mnth <- rep(MouthOC$Month, ncs - 2)
+mnth <- as.numeric(ordered(mnth, levels = month.name))
+dy <- rep(MouthOC$Day, ncs - 2)
+year <- rep(names(MouthOC)[3:ncs], each = nrs)
+year <- substring(year, 2,5)
+
+MouthOpC <- data.frame(open = OpnCls,
+                      date = as.Date(paste(mnth, dy, year, sep = "/"),
+                                     format = "%m/%d/%Y"))
+## USGS flow data
+
+colnames <- c("agency", "station.no", "date", "discharge", "blank")
+
+usgs <- read_tsv(paste(dataDIR, "USGS_OWC_dv.txt", sep="/"), 
+                   col_names = colnames, skip=31)
+##head(usgs)
+##tail(usgs)
+```
+
+## Merging Data
+
+Merging flow and water quality data by dates:
+
+```{r}
+usgs$mnth <- ordered(format(usgs$date, "%b"), levels=month.abb)
+usgs$yrmn <- format(usgs$date, "%Y-%b")
+usgs$yrwk <- format(usgs$date, "%Y-%U")
+usgs$week <- format(usgs$date, "%U")
+usgs$wknd <- format(usgs$date, "%w") ## weekend = no sampling
+usgs$wknd <- usgs$wknd==0 | usgs$wknd==6
+usgs$julian <- format(usgs$date, "%j")
+usgs$yr <- format(usgs$date, "%Y")
+
+## head(usgs)
+
+owc <- base::merge (owc_br[,-c(2:3,14:15)], owc_ol[,-c(2:3,14:15)], by=c("Date"))
+owc <- base::merge(owc, usgs[,c("date","discharge")], by.x="Date", by.y="date")
+
+## head(owc)
+
+drop.cols <- c("blank")
+owc <- owc[ , !(names(owc) %in% drop.cols)]
+##head(owc)
+
+```
+
+Convert flow column from cfs to m$^3$/s. (1 ft$^3$ = 0.0283168 m$^3$)
+
+Conversion base: 1 m$^3$ = 35.314666721489 ft$^3$.  For loading, the product of flow and concentration is converted from cfs $\times$ $\mu$g/L to ton/year: 
+
+$$
+\mathrm{cfs}\times\mu g/L \times (86400\times365)/(35.314666721489\times 1000000)\rightarrow T/yr
+$$
+Or, 1 cfs$\times\mu$g/L is 0.893 T/yr.
+
+Calculate loadings:
+
+```{r}
+
+owc$SRP_loading  <- 0.893 * owc$discharge * owc$SRP_in #T/ yr
+owc$TP_loading  <- 0.893 * owc$discharge * owc$TP_in #T/ yr
+owc$NO23_loading  <- 0.893 * owc$discharge * owc$NO23_in #T/ yr
+owc$TKN_loading  <- 0.893 * owc$discharge * owc$TKN_in #T/ yr
+
+## calculating daily averages
+owc_molten <- melt(owc, id.vars =c("Date"))
+owc_daily <- dcast(owc_molten, Date~variable, mean, na.rm=T)
+temp <- owc_daily$Date > as.Date("2000-01-01")
+owc_daily <- owc_daily[temp, ]
+
+days <- range(owc_daily$Date)
+days <- seq(days[1], days[2], 1)
+temp.dates <- data.frame(RDate=days, 
+                       mnth=ordered(format(days, "%b"), levels=month.abb), 
+                       yrmn = format(days, "%Y-%b"), 
+                       yrwk = format(days, "%Y-%U"),
+                       week = format(days, "%U"),
+                       wknd = format(days, "%w")==0 | format(date, "%w")==6,
+		         ## weekend = no sampling?
+                       julian = format(days, "%j"), 
+                       yr = format(days, "%Y")
+                   )
+
+## merging with owc data
+
+owc_daily <- merge(x=owc_daily, y=temp.dates, by.x="Date", by.y="RDate",
+                   all=T)
+
+## imputing missing data with weetly means using median polish:
+NAimpute <- function(col, daily=owc_daily, weekly=owc_weekly){
+    yr.wks <- tapply(weekly[,col], weekly$yr, length)
+    wkly <- matrix(NA, nrow=length(yr.wks), ncol=max(yr.wks))
+    for (i in 1:length(yr.wks)){
+        for (j in 1:max(yr.wks)){
+            temp <- weekly$yr==names(yr.wks)[i] & weekly$week==to2(j-1)
+            if (sum(temp)>0)
+                wkly[i,j] <- weekly[temp, col]
+        }
+    }
+    med <- medpolish(wkly, na.rm=T)
+    tmp <- is.na(daily[,col])
+    print(paste("Number of NAs to be imputed:", sum(tmp)))
+    if (sum(tmp)>0){
+        row.yr <- as.numeric(daily$yr)-min(as.numeric(daily$yr))+1
+        col.wk <- as.numeric(daily$week) + 1
+        daily[tmp, col] <- med$overall + med$row[row.yr[tmp]] +
+            med$col[col.wk[tmp]]    
+    }
+    return(daily[,col])
+}
+
+owc_molten2 <- melt(owc_daily, id=c("Date", "mnth","yrmn","yrwk",
+                                    "wknd","julian", "week","yr"))
+
+## dplyr::tbl_df(owc_molten2)
+
+owc_weekly <- dcast(owc_molten2, yr+week ~ variable, median, na.rm=T)
+
+owc_daily$Flow_in <- NAimpute(col="Flow_in")
+owc_daily$SS_in <- NAimpute(col="SS_in")
+owc_daily$TP_in <- NAimpute(col="TP_in")
+owc_daily$SRP_in <- NAimpute(col="SRP_in")
+owc_daily$NO23_in <- NAimpute(col="NO23_in")
+owc_daily$TKN_in <- NAimpute(col="TKN_in")
+owc_daily$SS_in <- NAimpute(col="SS_in")
+owc_daily$Flow_ef <- NAimpute(col="Flow_ef")
+owc_daily$SS_ef <- NAimpute(col="SS_ef")
+owc_daily$TP_ef <- NAimpute(col="TP_ef")
+owc_daily$SRP_ef <- NAimpute(col="SRP_ef")
+owc_daily$NO23_ef <- NAimpute(col="NO23_ef")
+owc_daily$TKN_ef <- NAimpute(col="TKN_ef")
+owc_daily$SS_ef <- NAimpute(col="SS_ef")
+
+```
+Seasonal and monthly
+
+```{r}
+owc$Month <- ordered(format(owc$Date, "%b"), levels=month.abb)
+owc$Year <- format(owc$Date, "%Y")
+owc$Quarter <- quarters(owc$Date)
+owc$Season <- "Spring"
+owc$Season[owc$Month==levels(owc$Month)[7]|
+           owc$Month==levels(owc$Month)[8]|
+	   owc$Month==levels(owc$Month)[9]] <- "Summer"
+owc$Season[owc$Month==levels(owc$Month)[10]|
+           owc$Month==levels(owc$Month)[11]] <- "Autumn"
+owc$Season[owc$Month==levels(owc$Month)[1]|
+           owc$Month==levels(owc$Month)[2]|
+	   owc$Month==levels(owc$Month)[12]] <- "Winter"
+
+```
+
+## Exploratory plots
+
+Exploratory data analysis (mainly graphical) is used to determine the appropriate level of aggregation of the input loading.  
+```{r}
+boxplot(log(owc$SRP_ef))
+##pdf("Ploading.pdf", width=5, height=3.5)
+  xyplot(TP_ef~ log(TP_loading)|Quarter, data=owc)
+##dev.off()
+##pdf("Pdissloading.pdf", width=5, height=3.5)
+  xyplot(SRP_ef~ log(SRP_loading)|Quarter, data=owc, subset=SRP_ef<4)
+##dev.off()
+
+##pdf("NOxloading.pdf", width=5, height=3.5)
+xyplot(NO23_ef~ log(NO23_loading)|Quarter, data=owc)
+##dev.off()
+xyplot(TKN_ef~ log(TKN_loading)|Quarter, data=owc)
+
+##  xyplot(NH3N_ef~ log(NH3N_loading), data=owc)
+  
+##  xyplot((NO3_ef+NO2_ef/1000)~ log(NOx_loading), data=owc)
+
+```
+## Calculating Moving Averages
+
+Various lengths of moving averages of input loading are calculated to represent the levels of input loading that correspond to the measured daily average effluent concentrations.
+```{r}
+owc_daily$maTPLD05 <- movingAverage(owc_daily$TP_loading, 5)
+owc_daily$maTPLD10 <- movingAverage(owc_daily$TP_loading, 10)
+owc_daily$maTPLD15 <- movingAverage(owc_daily$TP_loading, 15)
+owc_daily$maTPLD20 <- movingAverage(owc_daily$TP_loading, 20)
+
+owc_daily$Quarter <- quarters(owc_daily$Date)
+mth <- levels(owc_daily$mnth)
+owc_daily$Season <- "Spring"
+owc_daily$Season[owc_daily$mnth==mth[7] | owc_daily$mnth==mth[8] | owc_daily$mnth==mth[9]] <- "Summer"
+owc_daily$Season[owc_daily$mnth==mth[10] | owc_daily$mnth==mth[11]] <- "Autumn"
+owc_daily$Season[owc_daily$mnth==mth[1] | owc_daily$mnth==mth[2] | owc_daily$mnth==mth[12]] <- "Winter"
+
+## add mouth open/close status -- mouth opening status may affect hydroloc residence time.
+owc_daily <- base::merge(owc_daily, MouthOpC, by.x="Date", by.y="date")
+tmp <- paste(owc_daily$Season, owc_daily$open)
+##table(tmp)
+
+## Seasons and open/close overlap: Winter and spring mostly open,
+##  and summer and autumn mostly closed
+
+owc_daily $ TPloadX <- ifelse (owc_daily$Season=="Winter" |                   
+                               owc_daily$Season=="Spring", 
+                               owc_daily$maTPLD15, owc_daily$maTPLD05)
+
+xyplot(TP_ef~ log(maTPLD05), data=owc_daily)
+xyplot(TP_ef~ log(maTPLD10), data=owc_daily)
+xyplot(TP_ef~ log(maTPLD15), data=owc_daily)
+xyplot(TP_ef~ log(maTPLD20), data=owc_daily)
+
+xyplot(TP_ef~ log(maTPLD05)|Season, data=owc_daily)
+xyplot(TP_ef~ log(maTPLD10)|Season, data=owc_daily)
+xyplot(TP_ef~ log(maTPLD15)|Season, data=owc_daily)
+xyplot(TP_ef~ log(maTPLD20)|Season, data=owc_daily)
+xyplot(TP_ef~ log(maTPLD05)|Season*yr, data=owc_daily)
+
+xyplot(TP_ef~ log(TPloadX)|Season, data=owc_daily)
+```
+
+Summary: 
+
+- OWC daily data are compiled into one file, including effluent TP concentrations and several moving average TP loadings.  
+- The data can be grouped by season, which overlaps with the beach barrier open/close status (the barrier is mostly closed in Winter and Spring, and open in summer and fall).  When the barrier is open, the 5-day moving average TP loading is appropriate. When the barrier is closed, 10 or 15-day moving average is appropriate. 
+
+## Crane Creek Data
+Crane Creek data are measured every 15 minutes.  The site has only one opening point to Lake Erie.  Water inflow and outflow are controlled by Lake.  
+
+Including "phase":
+
+Phase one: March 4 - June 16 (week 9 to 23)
+Phase two: June 17 - September 7 (week 24-35)
+Phase three: September 8 - November 30 (week 36-48)
+Phase four: December 1 - December 30 plus January 1 - March 3rd. (week 49-52, and 1-8)
+
+
+```{r}
+ottawa <- read.csv(paste(dataDIR, "Ottawa2012.csv", sep="/"), header = T)
+head(ottawa)
+ottawa <- ottawa[,c(1:3, 6:7)]
+
+ottawa$RDate <- as.Date(ottawa$Date, format="%m/%d/%y %H:%M")
+ottawa$Month <- ordered(format(ottawa$RDate, "%m"), labels=month.abb[9:12])
+##ottawa <- ottawa[, c(1:3, 6:7, 10:11)]
+names(ottawa) <- c("Date", "Flow", "Velocity", "Turbidity", "TP", "RDate", "Month")
+
+ottawa_in <- ottawa[ottawa$Flow<0, ]
+ottawa_out <- ottawa[ottawa$Flow>0, ]
+
+ottawa_2013 <- read.csv(paste(dataDIR, "Ottawa2013.csv", sep="/"), header = T)
+ottawa_2013 <- ottawa_2013[,c(1:2, 4, 6:7)]
+ottawa_2013$RDate <- as.Date(ottawa_2013$Date, format="%m/%d/%y %H:%M")
+ottawa_2013$Month <- ordered(format(ottawa_2013$RDate, "%m"))
+names(ottawa_2013) <- c("Date", "Flow", "Velocity", "Turbidity", "TP", "RDate", "Month")
+ottawa_2013_in <- ottawa_2013[ottawa_2013$Flow<0, ]
+ottawa_2013_out <- ottawa_2013[ottawa_2013$Flow>0, ]
+
+ottawa_2014 <- read.csv(paste(dataDIR, "Ottawa2014.csv", sep="/"), header = T)
+ottawa_2014 <- ottawa_2014[,c(1:3, 6:7)]
+ottawa_2014$RDate <- as.Date(ottawa_2014$Date, format="%m/%d/%y %H:%M")
+ottawa_2014$Month <- ordered(format(ottawa_2014$RDate, "%m"), labels=month.abb[c(3:6, 8:11)])
+names(ottawa_2014) <- c("Date", "Flow", "Velocity", "Turbidity", "TP", "RDate", "Month")
+ottawa_2014_in <- ottawa_2014[ottawa_2014$Flow<0, ]
+ottawa_2014_out <- ottawa_2014[ottawa_2014$Flow>0, ]
+
+```
+### Aggregating Data
+Crane Creek seiche data were recorded every 15 minutes. A daily average in and out loading and average concentrations are used.
+
+```{r}
+ottawa_in.molten <- melt(ottawa_in, id.var = c("Month","RDate","Date"), measured.vars = c("Flow", "TP", "Turbidity"), na.rm = T)
+ottawa_dailyin <- dcast(ottawa_in.molten, RDate ~ variable,  mean)
+
+ottawa_out.molten <- melt(ottawa_out, id.var = c("Month","RDate","Date"), measured.vars = c("Flow", "TP", "Turbidity"), na.rm = T)
+ottawa_dailyout <- dcast(ottawa_out.molten, RDate ~ variable,  mean)
+
+names(ottawa_dailyin) <- c("RDate", "Flow_in", "Velocity_in", "Turbidity_in", "TP_in")
+names(ottawa_dailyout) <- c("RDate", "Flow_out", "Velocity_out", "Turbidity_out", "TP_out")
+
+ottawa_daily <- merge(ottawa_dailyin, ottawa_dailyout, by=c("RDate"))
+
+ottawa_daily$TPload_in <- -ottawa_daily$TP_in * ottawa_daily$Flow_in * (86400*365)/(35.314666721489)/1000000 ## ton/yr
+ottawa_daily$TPload_out <- ottawa_daily$TP_out * ottawa_daily$Flow_out * (86400*365)/(35.314666721489)/1000000 ## ton/yr
+ottawa_daily$Week <- format(ottawa_daily$RDate, "%W")
+
+ottawa_weekly <- melt (ottawa_daily, id.var=c("RDate", "Week"))
+ottawa_weekly <- dcast(ottawa_weekly, Week~variable, mean)
+
+## 2013
+ottawa_2013_in.molten <- melt(ottawa_2013_in, id.var = c("Month","RDate","Date"), measured.vars = c("Flow", "TP", "Turbidity"), na.rm = T)
+ottawa_2013_dailyin <- dcast(ottawa_2013_in.molten, RDate ~ variable,  mean)
+
+ottawa_2013_out.molten <- melt(ottawa_2013_out, id.var = c("Month","RDate","Date"), measured.vars = c("Flow", "TP", "Turbidity"), na.rm = T)
+ottawa_2013_dailyout <- dcast(ottawa_2013_out.molten, RDate ~ variable,  mean)
+
+names(ottawa_2013_dailyin) <- c("RDate", "Flow_in", "Velocity_in", "Turbidity_in", "TP_in")
+names(ottawa_2013_dailyout) <- c("RDate", "Flow_out", "Velocity_out", "Turbidity_out", "TP_out")
+
+ottawa_2013_daily <- merge(ottawa_2013_dailyin, ottawa_2013_dailyout, by=c("RDate"))
+
+ottawa_2013_daily$TPload_in <- -ottawa_2013_daily$TP_in * ottawa_2013_daily$Flow_in * 0.893 ## ton/yr
+ottawa_2013_daily$TPload_out <- ottawa_2013_daily$TP_out * ottawa_2013_daily$Flow_out * 0.893 ## ton/yr
+ottawa_2013_daily$Week <- format(ottawa_2013_daily$RDate, "%W")
+
+ottawa_2013_weekly <- melt (ottawa_2013_daily, id.var=c("RDate", "Week"))
+ottawa_2013_weekly <- dcast(ottawa_2013_weekly, Week~variable, mean)
+
+## 2014
+ottawa_2014_in.molten <- melt(ottawa_2014_in, id.var = c("Month","RDate","Date"), measured.vars = c("Flow", "TP", "Turbidity"), na.rm = T)
+ottawa_2014_dailyin <- dcast(ottawa_2014_in.molten, RDate ~ variable,  mean)
+
+ottawa_2014_out.molten <- melt(ottawa_2014_out, id.var = c("Month","RDate","Date"), measured.vars = c("Flow", "TP", "Turbidity"), na.rm = T)
+ottawa_2014_dailyout <- dcast(ottawa_2014_out.molten, RDate ~ variable,  mean)
+
+names(ottawa_2014_dailyin) <- c("RDate", "Flow_in", "Velocity_in", "Turbidity_in", "TP_in")
+names(ottawa_2014_dailyout) <- c("RDate", "Flow_out", "Velocity_out", "Turbidity_out", "TP_out")
+
+ottawa_2014_daily <- merge(ottawa_2014_dailyin, ottawa_2014_dailyout, by=c("RDate"))
+
+ottawa_2014_daily$TPload_in <- -ottawa_2014_daily$TP_in * ottawa_2014_daily$Flow_in * 0.893 ## ton/yr
+ottawa_2014_daily$TPload_out <- ottawa_2014_daily$TP_out * ottawa_2014_daily$Flow_out * 0.893 ## ton/yr
+ottawa_2014_daily$Week <- format(ottawa_2014_daily$RDate, "%W")
+
+ottawa_2014_weekly <- melt (ottawa_2014_daily, id.var=c("RDate", "Week"))
+ottawa_2014_weekly <- dcast(ottawa_2014_weekly, Week~variable, mean)
+
+## Combine the three years data
+
+ottawa_daily$Year <- 2012
+ottawa_weekly$Year <- 2012
+
+ottawa_2013_daily$Year <- 2013
+ottawa_2013_weekly$Year <- 2013
+
+ottawa_2014_daily$Year <- 2014
+ottawa_2014_weekly$Year <- 2014
+
+ottawa_daily <- rbind(ottawa_daily, ottawa_2013_daily, ottawa_2014_daily)
+
+ottawa_weekly <- rbind(ottawa_weekly, ottawa_2013_weekly, ottawa_2014_weekly)
+ottawa_weekly$Phase <- 4
+ttt <- as.numeric(ottawa_weekly$Week)
+ottawa_weekly$Phase[ttt>8 & ttt<=23] <- 1
+ottawa_weekly$Phase[ttt>23 & ttt<=35] <- 2
+ottawa_weekly$Phase[ttt>25 & ttt<=48] <- 3
+
+ottawa_daily$Phase <- 4
+ttt <- as.numeric(ottawa_daily$Week)
+ottawa_daily$Phase[ttt>8 & ttt<=23] <- 1
+ottawa_daily$Phase[ttt>23 & ttt<=35] <- 2
+ottawa_daily$Phase[ttt>25 & ttt<=48] <- 3
+
+xyplot(TP_out ~ log(TPload_in)|factor(Year), data=ottawa_daily)
+xyplot(TP_out ~ log(TPload_in)|factor(Year), data=ottawa_weekly)
+xyplot(TP_out ~ log(TPload_in)|factor(Phase), data=ottawa_weekly)
+xyplot(TP_out ~ log(TPload_in)|factor(Phase), data=ottawa_daily)
+
+```
+ Summary
+ - Crane Creek data are relatively simple in their structure.  The input is aggregated to weekly or monthly means.
+ - 
+
+## Coldwater Creek
+
+Data from this constructed wetland are weekly/bi-weekly monitoring results.  Because of the varying input flow (hence varying hydrological residence time), monthly average input loading and effluent concentration are used. 
+
+```{r}
+cwc <- read_csv(paste(dataDIR, "cwcdata.csv", sep="/"))
+names(cwc) <- c("week","site","flow","height","restime", "Date", "NO3_in", "TP_in", "DRP_in", "TSS_in", "NO3_out", "TP_out", "DRP_out", "TSS_out")
+cwc$RDate <- as.Date(cwc$Date, format="%m/%d/%y")
+
+cwc_temp <- cwc[,c("flow","NO3_in","TP_in","DRP_in","TSS_in","NO3_out","TP_out","DRP_out","TSS_out","RDate")]
+cwc_temp$TPLoading <- cwc$TP_in*cwc$flow * 0.893 ## tons per year
+cwc_temp$DRPLoading <- cwc$DRP_in*cwc$flow * 0.893  ## tons per year
+cwc_temp$NO3Loading <- cwc$NO3_in*cwc$flow * 0.893  ## tons per year
+cwc_temp$Month <- format(cwc$RDate, format="%m/%y")
+cwc_month <- melt(cwc_temp, id=c("RDate", "Month"))
+  
+cwc_month <- dcast(cwc_month, Month~variable, mean, na.rm=T)
+xyplot(TP_out ~ log(TPLoading), data=cwc_month)
+xyplot(DRP_out ~ log(DRPLoading), data=cwc_month)
+
+## New data were made available near the end of the project
+cwc_flow <- read.csv(paste(dataDIR, "CWC_Flow.csv", sep="/"))
+names(cwc_flow) <- c("Date", "Site", "Flow", "tau")
+cwc_flow$RDate <- as.Date(cwc_flow$Date, format="%m/%d/%Y")
+cwc_flow$Month <- format(cwc_flow$RDate, format="%m/%y")
+
+cwc_tp <- read.csv(paste(dataDIR, "CWC_TP.csv", sep="/"))[1:204,1:4]
+names(cwc_tp) <- c("Date", "Season", "Site", "TP") 
+cwc_tp$RDate <- as.Date(cwc_tp$Date, format="%m/%d/%y")
+cwc_tp$Month <- format(cwc_tp$RDate, format="%m/%y")
+
+cwc_tp_in <- cwc_tp %>% filter(Site==levels(Site)[2])
+cwc_tp_out <- cwc_tp %>% filter(Site==levels(Site)[3])
+
+flow_mean <- group_by(cwc_flow, Month) %>%dplyr::summarise(fmean=mean(Flow, na.rm=T))
+tp_in_mean <- group_by(cwc_tp_in, Month) %>%dplyr::summarise(TP_in=mean(TP, na.rm=T))
+tp_out_mean <- group_by(cwc_tp_out, Month) %>%dplyr::summarise(TP_out=mean(TP, na.rm=T))
+
+cwc_monthly <- left_join(flow_mean, tp_in_mean, by="Month") 
+cwc_monthly <- left_join(cwc_monthly, tp_out_mean, by="Month")
+cwc_monthly$TPload <- cwc_monthly$fmean*cwc_monthly$TP_in * 0.893
+## tons per year
+
+png(filename="cwc_new.png", width=4.75*120, height=3*120)
+ggplot(cwc_monthly, aes(x=TPload, y=TP_out))+geom_point()+scale_x_log10()+scale_y_log10()+xlab("TP Loading (ton/yr)")+ylab("TP Concentration (mg/L)")
+dev.off()
+```
+
+## Olentangy River Wetlands
+```{r}
+olentangy <- read.csv(paste(dataDIR, "Olentangy.csv", sep="/"), header = T)
+head(olentangy)
+
+## loading: flow in gpm, conc in mg/L
+
+olentangy$LD1 <- olentangy$Flow1*olentangy$TPin1 * 3.78541*60*24*365 * 10^(-9) ##gpm*mg/L -> Ton/yr
+olentangy$LD2 <- olentangy$Flow2*olentangy$TPin2 * 3.78541*60*24*365 * 10^(-9)
+olentangy$LD1[olentangy$LD1<0] <- NA
+olentangy$LD2[olentangy$LD2<0] <- NA
+
+olentangy$Rdate <- as.Date(olentangy$Date, format="%m/%d/%Y")
+olentangy$MY <- format(olentangy$Rdate, format="%Y/%m")
+muLD1 <- by(olentangy$LD1, olentangy$MY, mean, na.rm=T)
+muLD2 <- by(olentangy$LD2, olentangy$MY, mean, na.rm=T)
+
+oo <- as.numeric(ordered(olentangy$MY))
+olentangy$muLD1 <- muLD1[oo]
+olentangy$muLD2 <- muLD2[oo]
+
+```
+Plots:
+
+```{r}
+par(mfrow=c(1,2))
+plot(TPout1 ~ LD1, data=olentangy, log="xy")
+plot(TPout2 ~ LD2, data=olentangy, log="xy")
+
+```
+
+## Saving Data 
+Datasets created on this file will be used for developing the Bayesian updating model.  These data objects are saved as a `.RData` file for easy processing.
+
+```{r}
+save(ottawa_daily, ottawa_weekly, owc_daily, cwc_month, cwc_monthly, olentangy, file="owc_data.RData")
+
+```
+
