@@ -1,0 +1,1 @@
+This folder includes 4 Rmarkdown files (`OWCproject_1:4*.Rmd`) used for the Old Woman Creek project.  Data from the 4 wetlands are in the `Data` folder.  An example of using the model is included in the `example` folder, where the model is written in Jupyter notebook and can be run on Google Colaboratory (colab) without needing to install R and Stan locally. 
