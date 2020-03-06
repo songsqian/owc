@@ -3,122 +3,36 @@ title: "Old Woman Creek Project -- Data Processing "
 author: "Song Qian"
 date: "March 11, 2019"
 output: pdf_document
-editor_options: 
+editor_options:
   chunk_output_type: console
 ---
 
-# Introduction 
+# Introduction
 
-This file includes data processing code for the Old Woman Creek project. Data used include daily monitoring data from Old Woman Creek (divided into four seasons), three year intensive monitoring at Crane Creek, two phases of monitoring of Coldwater Creek wetland, and a long term data from Olentangy River Wetlands.  The R code organizes the input data into two main columns: input P loading and output P concentration, using necessary grouping variables (season, location, year, etc.).  
+The hockey stick model used for estimating wetland phosphorus (total phosphorus, TP) retention capacity uses the effluent TP concentration as the response variable and TP input mass loading as the predictor.  Consequently, the task of data preparation is to create a data frame with at least two columns: TP effluent concentrations and the corresponding TP mass input loading.  Because the hockey stick model is developed based the mechanism of long-term phosphorus retention, the loading data used for fitting the model should reflect a reasonable temporal aggregation to match the average hydraulic residence time.  It is rarely feasible to have daily monitoring data for wetlands.  Typically, we may have weekly or bi-weekly monitoring data.  If the wetland is of a moderate size (e.g., with a hydraulic residence time less than a month), monthly averages of loading and effluent concentrations are typically adequate.
+
+In this document, we present examples of data processing from four wetland systems. An important part of data processing is to select an appropriate level of temporal aggregation because of the varying hydraulic residence time due to changing input flow.  Hydraulic loading to a typical wetland varies over time.  Pairing simultaneously measured input loading and effluent concentration as an observation can be misleading as input water need time to travel to the outlet.  Consequently, we should always aggregate the data into averages of a longer time period to better match input and output.  When using, for example, weekly monitoring data, we may choose to aggregate the data into a monthly basis if the typical hydraulic residence time is shorter than a month.
+
+The data from Old Woman Creek National Estuary Research Reserve include four-year intensive monitoring of daily input and output TP concentrations.  This unusually large data set is used to illustrate the process of fitting the hockey stick model and the hierarchical hockey stick model when the data are divided into four seasonal subsets.  Five-day moving averages of input loadings are calculated as the predictor variable to reflect the average loading. The hydraulic residence time is between 3-10 days.
+
+The second data set is from a three-year intensive monitoring at Crane Creek, a Lake Erie coastal wetland with only one opening connecting to the lake.  Water going in and out of the wetland because of lake seiche events.  A continuous monitoring instrument recorded discharges in and out every 15 minutes and auto-samplers collected water samples at the same frequency.  Because the lake levels in Lake Erie vary, we divided the data by year.  Weekly mean input loading and mean effluent concentration were used.
+
+Coldwater Creek wetland is a constructed treatment wetland near Grand Lake Saint Marys.  We use the weekly monitoring data, and aggregated the data into monthly means of effluent concentrations and input mass loadings.  The wetland was initially used to illustrate the situation where only limited data were available.  There were only 8 monthly mean observations.  Using the fitted model, we developed a sample size estimation method for derive the necessary sample size to achieve a desired level of certainty.  With additional data that were made available later during the project, we used this wetland to demonstrate the updating process.  The additional data also suggest that the sample size estimation method we used is a conservative one.
+
+The last data set used came from the long term monitoring program of the Olentangy River Experimental Wetlands.  These two wetlands were constructed in the 1980s to study wetland plant community succession.  Weekly monitoring data were aggregate into monthly means.  The two wetlands were fit separately.
+
+The R code organizes the input data into two main columns: input P loading and output P concentration, using necessary grouping variables (season, location, year, etc.).  For most routine wetland monitoring data, we will typically have observations on a weekly or bi-weekly basis.  As a result, R code for organizing Coldwater Creek and Olentangy River wetlands should be used.
+
+## Simple Functions
 
 The following code chunk includes small functions used in the project and loads necessary packages.
 ```{r setup, include=FALSE}
 ## functions and setup
-to2 <- function(x){
-    ## conver a single digit integer to 0x
-    return(ifelse (x<10, paste("0",x, sep=""), as.character(x)))
-}
-
-hockey_smooth <- function(x, beta0, beta1=0, delta, phi, theta=NULL)
-{
-    if (is.null(theta)) theta=0.01*diff(range(x))
-    return(beta0 + beta1 * (x-phi) +
-           delta * theta * log1p(exp((x-phi)/theta)))
-}
-
-
-movingAverage <- function(x, n=1, centered=FALSE) {
-    if (centered) {
-        before <- floor  ((n-1)/2)
-        after  <- ceiling((n-1)/2)
-    } else {
-        before <- n-1
-        after  <- 0
-    }
-    
-    ## Track the sum and count of number of non-NA items
-    s     <- rep(0, length(x))
-    count <- rep(0, length(x))
-    
-    # Add the centered data 
-    new <- x
-    # Add to count list wherever there isn't a 
-    count <- count + !is.na(new)
-    # Now replace NA_s with 0_s and add to total
-    new[is.na(new)] <- 0
-    s <- s + new
-    
-    # Add the data from before
-    i <- 1
-    while (i <= before) {
-        # This is the vector with offset values to add
-        new   <- c(rep(NA, i), x[1:(length(x)-i)])
-
-        count <- count + !is.na(new)
-        new[is.na(new)] <- 0
-        s <- s + new
-        
-        i <- i+1
-    }
-
-    # Add the data from after
-    i <- 1
-    while (i <= after) {
-        # This is the vector with offset values to add
-        new   <- c(x[(i+1):length(x)], rep(NA, i))
-       
-        count <- count + !is.na(new)
-        new[is.na(new)] <- 0
-        s <- s + new
-        
-        i <- i+1
-    }
-    
-    # return sum divided by count
-    s/count
-}
-
-line.plots <- function(est, se, Ylabel, Xlab, yaxis=2, Xlim=NULL,
-                       rscale=F, At=NULL, Lab=NULL, V=0){
-    if (is.null(Xlim)) Xlim <- range(c(est+2*se, est-2*se))
-    n <- length(est)
-    if(n != length(se))stop("lengths not match")
-    plot(1:n, 1:n, xlim=Xlim, ylim=c(0.75, n+0.25),
-         type="n", axes=F, xlab=Xlab, ylab="")
-    if (rscale)
-        axis(1, at=At, labels=Lab)
-    else
-        axis(1)
-    axis(yaxis, at=1:n, labels=Ylabel, las=1)
-    segments(y0=1:n, y1=1:n, x0=est-2*se, x1=est+2*se)
-    segments(y0=1:n, y1=1:n, x0=est-1*se, x1=est+1*se, lwd=2.5)
-    points(est, 1:n)
-    if (!is.null(V)) abline(v=V, col="gray")
-    invisible()
-}
-
-packages<-function(x, repos="http://cran.r-project.org", ...){
-    x<-as.character(match.call()[[2]])
-    if (!require(x,character.only=TRUE)){
-        install.packages(pkgs=x, repos=repos, ...)
-        require(x,character.only=TRUE)
-    }
-}
-
-packages(tidyverse)
-packages(readr)
-
-packages(rv)
-packages(arm)
-packages(lattice)
-packages(tikzDevice)
-packages(car)
-packages(formatR)
-
+source("FrontMatter.R")
 ```
 ## Old Woman Creek Data
 
-Data files include water quality data from two monitoring sites (input at Berlin Road and output at site "OL"), USGS flow data, and a separate file on the OWC mouth status (open or closed).
+Data files include water quality data from two monitoring sites (input at Berlin Road and output at site "OL"), USGS flow data, and a separate file on the OWC mouth status (open or closed).  The default file system setup assumes all data files are in the subfolder `Data`.
 
 ```{r read}
 base <- getwd()
@@ -128,13 +42,12 @@ dataDIR <- paste(base, "Data", sep="/")
 owc_br <- read_csv(paste(dataDIR, "BerlinOWCData.csv", sep="/"))
 names(owc_br) <- c("Date","Days","Time","Flow_in","SS_in","TP_in","SRP_in",
                      "NO23_in", "TKN_in","Chloride_in","Sulfate_in","Silica_in",
-                     "Conductivity_in","Future","Month")          
+                     "Conductivity_in","Future","Month")
 
 owc_ol <- read_csv(paste(dataDIR, "LakeOWCData.csv", sep="/"))
 names(owc_ol) <- c("Date","Days","Time","Flow_ef","SS_ef","TP_ef","SRP_ef",
                      "NO23_ef", "TKN_ef","Chloride_ef","Sulfate_ef","Silica_ef",
-                     "Conductivity_ef","Future","Month")          
-
+                     "Conductivity_ef","Future","Month")
 
 owc_br$Date <- as.Date(owc_br$Date, format="%m/%d/%y %H:%M")
 owc_ol$Date <- as.Date(owc_ol$Date, format="%m/%d/%y %H:%M")
@@ -163,13 +76,13 @@ MouthOpC <- data.frame(open = OpnCls,
 
 colnames <- c("agency", "station.no", "date", "discharge", "blank")
 
-usgs <- read_tsv(paste(dataDIR, "USGS_OWC_dv.txt", sep="/"), 
+usgs <- read_tsv(paste(dataDIR, "USGS_OWC_dv.txt", sep="/"),
                    col_names = colnames, skip=31)
 ##head(usgs)
 ##tail(usgs)
 ```
 
-## Merging Data
+### Merging Data
 
 Merging flow and water quality data by dates:
 
@@ -198,7 +111,7 @@ owc <- owc[ , !(names(owc) %in% drop.cols)]
 
 Convert flow column from cfs to m$^3$/s. (1 ft$^3$ = 0.0283168 m$^3$)
 
-Conversion base: 1 m$^3$ = 35.314666721489 ft$^3$.  For loading, the product of flow and concentration is converted from cfs $\times$ $\mu$g/L to ton/year: 
+Conversion base: 1 m$^3$ = 35.314666721489 ft$^3$.  For loading, the product of flow and concentration is converted from cfs $\times$ $\mu$g/L to ton/year:
 
 $$
 \mathrm{cfs}\times\mu g/L \times (86400\times365)/(35.314666721489\times 1000000)\rightarrow T/yr
@@ -222,14 +135,14 @@ owc_daily <- owc_daily[temp, ]
 
 days <- range(owc_daily$Date)
 days <- seq(days[1], days[2], 1)
-temp.dates <- data.frame(RDate=days, 
-                       mnth=ordered(format(days, "%b"), levels=month.abb), 
-                       yrmn = format(days, "%Y-%b"), 
+temp.dates <- data.frame(RDate=days,
+                       mnth=ordered(format(days, "%b"), levels=month.abb),
+                       yrmn = format(days, "%Y-%b"),
                        yrwk = format(days, "%Y-%U"),
                        week = format(days, "%U"),
                        wknd = format(days, "%w")==0 | format(date, "%w")==6,
 		         ## weekend = no sampling?
-                       julian = format(days, "%j"), 
+                       julian = format(days, "%j"),
                        yr = format(days, "%Y")
                    )
 
@@ -256,7 +169,7 @@ NAimpute <- function(col, daily=owc_daily, weekly=owc_weekly){
         row.yr <- as.numeric(daily$yr)-min(as.numeric(daily$yr))+1
         col.wk <- as.numeric(daily$week) + 1
         daily[tmp, col] <- med$overall + med$row[row.yr[tmp]] +
-            med$col[col.wk[tmp]]    
+            med$col[col.wk[tmp]]
     }
     return(daily[,col])
 }
@@ -302,9 +215,9 @@ owc$Season[owc$Month==levels(owc$Month)[1]|
 
 ```
 
-## Exploratory plots
+### Exploratory plots
 
-Exploratory data analysis (mainly graphical) is used to determine the appropriate level of aggregation of the input loading.  
+Exploratory data analysis (mainly graphical) is used to determine the appropriate level of aggregation of the input loading.
 ```{r}
 boxplot(log(owc$SRP_ef))
 ##pdf("Ploading.pdf", width=5, height=3.5)
@@ -324,7 +237,7 @@ xyplot(TKN_ef~ log(TKN_loading)|Quarter, data=owc)
 ##  xyplot((NO3_ef+NO2_ef/1000)~ log(NOx_loading), data=owc)
 
 ```
-## Calculating Moving Averages
+### Calculating Moving Averages
 
 Various lengths of moving averages of input loading are calculated to represent the levels of input loading that correspond to the measured daily average effluent concentrations.
 ```{r}
@@ -348,8 +261,8 @@ tmp <- paste(owc_daily$Season, owc_daily$open)
 ## Seasons and open/close overlap: Winter and spring mostly open,
 ##  and summer and autumn mostly closed
 
-owc_daily $ TPloadX <- ifelse (owc_daily$Season=="Winter" |                   
-                               owc_daily$Season=="Spring", 
+owc_daily $ TPloadX <- ifelse (owc_daily$Season=="Winter" |
+                               owc_daily$Season=="Spring",
                                owc_daily$maTPLD15, owc_daily$maTPLD05)
 
 xyplot(TP_ef~ log(maTPLD05), data=owc_daily)
@@ -366,13 +279,13 @@ xyplot(TP_ef~ log(maTPLD05)|Season*yr, data=owc_daily)
 xyplot(TP_ef~ log(TPloadX)|Season, data=owc_daily)
 ```
 
-Summary: 
+Summary:
 
-- OWC daily data are compiled into one file, including effluent TP concentrations and several moving average TP loadings.  
-- The data can be grouped by season, which overlaps with the beach barrier open/close status (the barrier is mostly closed in Winter and Spring, and open in summer and fall).  When the barrier is open, the 5-day moving average TP loading is appropriate. When the barrier is closed, 10 or 15-day moving average is appropriate. 
+- OWC daily data are compiled into one file, including effluent TP concentrations and several moving average TP loadings.
+- The data can be grouped by season, which overlaps with the beach barrier open/close status (the barrier is mostly closed in Winter and Spring, and open in summer and fall).  When the barrier is open, the 5-day moving average TP loading is appropriate. When the barrier is closed, 10 or 15-day moving average is appropriate.
 
 ## Crane Creek Data
-Crane Creek data are measured every 15 minutes.  The site has only one opening point to Lake Erie.  Water inflow and outflow are controlled by Lake.  
+Crane Creek data are measured every 15 minutes.  The site has only one opening point to Lake Erie.  Water inflow and outflow are controlled by Lake Erie.
 
 Including "phase":
 
@@ -426,7 +339,6 @@ names(ottawa_dailyin) <- c("RDate", "Flow_in", "Velocity_in", "Turbidity_in", "T
 names(ottawa_dailyout) <- c("RDate", "Flow_out", "Velocity_out", "Turbidity_out", "TP_out")
 
 ottawa_daily <- merge(ottawa_dailyin, ottawa_dailyout, by=c("RDate"))
-
 ottawa_daily$TPload_in <- -ottawa_daily$TP_in * ottawa_daily$Flow_in * (86400*365)/(35.314666721489)/1000000 ## ton/yr
 ottawa_daily$TPload_out <- ottawa_daily$TP_out * ottawa_daily$Flow_out * (86400*365)/(35.314666721489)/1000000 ## ton/yr
 ottawa_daily$Week <- format(ottawa_daily$RDate, "%W")
@@ -505,12 +417,11 @@ xyplot(TP_out ~ log(TPload_in)|factor(Phase), data=ottawa_daily)
 
 ```
  Summary
- - Crane Creek data are relatively simple in their structure.  The input is aggregated to weekly or monthly means.
- - 
+ - Crane Creek data are relatively simple in their structure.  The input is aggregated to daily or weekly means.
 
 ## Coldwater Creek
 
-Data from this constructed wetland are weekly/bi-weekly monitoring results.  Because of the varying input flow (hence varying hydrological residence time), monthly average input loading and effluent concentration are used. 
+Data from this constructed wetland are weekly/bi-weekly monitoring results.  Because of the varying input flow (hence varying hydrological residence time), monthly average input loading and effluent concentration are used.
 
 ```{r}
 cwc <- read_csv(paste(dataDIR, "cwcdata.csv", sep="/"))
@@ -518,9 +429,9 @@ names(cwc) <- c("week","site","flow","height","restime", "Date", "NO3_in", "TP_i
 cwc$RDate <- as.Date(cwc$Date, format="%m/%d/%y")
 
 cwc_temp <- cwc[,c("flow","NO3_in","TP_in","DRP_in","TSS_in","NO3_out","TP_out","DRP_out","TSS_out","RDate")]
-cwc_temp$TPLoading <- cwc$TP_in*cwc$flow * 0.893 ## tons per year
-cwc_temp$DRPLoading <- cwc$DRP_in*cwc$flow * 0.893  ## tons per year
-cwc_temp$NO3Loading <- cwc$NO3_in*cwc$flow * 0.893  ## tons per year
+cwc_temp$TPLoading <- cwc$TP_in*cwc$flow * 0.001989611 ## tons per year -- flow in GPM and conc in mg/L
+cwc_temp$DRPLoading <- cwc$DRP_in*cwc$flow * 0.001989611  ## tons per year
+cwc_temp$NO3Loading <- cwc$NO3_in*cwc$flow * 0.001989611  ## tons per year
 cwc_temp$Month <- format(cwc$RDate, format="%m/%y")
 cwc_month <- melt(cwc_temp, id=c("RDate", "Month"))
   
@@ -528,35 +439,40 @@ cwc_month <- dcast(cwc_month, Month~variable, mean, na.rm=T)
 xyplot(TP_out ~ log(TPLoading), data=cwc_month)
 xyplot(DRP_out ~ log(DRPLoading), data=cwc_month)
 
-## New data were made available near the end of the project
+## Updating -- New data were made available near the end of the project
 cwc_flow <- read.csv(paste(dataDIR, "CWC_Flow.csv", sep="/"))
 names(cwc_flow) <- c("Date", "Site", "Flow", "tau")
 cwc_flow$RDate <- as.Date(cwc_flow$Date, format="%m/%d/%Y")
 cwc_flow$Month <- format(cwc_flow$RDate, format="%m/%y")
 
-cwc_tp <- read.csv(paste(dataDIR, "CWC_TP.csv", sep="/"))[1:204,1:4]
-names(cwc_tp) <- c("Date", "Season", "Site", "TP") 
+cwc_tp <- read.csv(paste(dataDIR, "CWC_TP2.csv", sep="/"))
+names(cwc_tp) <- c("Date", "Season", "Site", "TP")
 cwc_tp$RDate <- as.Date(cwc_tp$Date, format="%m/%d/%y")
 cwc_tp$Month <- format(cwc_tp$RDate, format="%m/%y")
 
-cwc_tp_in <- cwc_tp %>% filter(Site==levels(Site)[2])
-cwc_tp_out <- cwc_tp %>% filter(Site==levels(Site)[3])
+cwc_tp_in <- cwc_tp %>% filter(Site==levels(Site)[1])
+cwc_tp_out <- cwc_tp %>% filter(Site==levels(Site)[2])
 
 flow_mean <- group_by(cwc_flow, Month) %>%dplyr::summarise(fmean=mean(Flow, na.rm=T))
 tp_in_mean <- group_by(cwc_tp_in, Month) %>%dplyr::summarise(TP_in=mean(TP, na.rm=T))
 tp_out_mean <- group_by(cwc_tp_out, Month) %>%dplyr::summarise(TP_out=mean(TP, na.rm=T))
 
-cwc_monthly <- left_join(flow_mean, tp_in_mean, by="Month") 
+cwc_monthly <- left_join(flow_mean, tp_in_mean, by="Month")
 cwc_monthly <- left_join(cwc_monthly, tp_out_mean, by="Month")
-cwc_monthly$TPload <- cwc_monthly$fmean*cwc_monthly$TP_in * 0.893
+cwc_monthly$TPload <- cwc_monthly$fmean*cwc_monthly$TP_in * 0.001989611
 ## tons per year
 
 png(filename="cwc_new.png", width=4.75*120, height=3*120)
-ggplot(cwc_monthly, aes(x=TPload, y=TP_out))+geom_point()+scale_x_log10()+scale_y_log10()+xlab("TP Loading (ton/yr)")+ylab("TP Concentration (mg/L)")
+ggplot(cwc_monthly, aes(x=TPload, y=TP_out)) +
+  geom_point()+
+  scale_x_log10()+
+  scale_y_log10()+
+  xlab("TP Loading (ton/yr)")+ylab("TP Concentration (mg/L)")
 dev.off()
 ```
 
 ## Olentangy River Wetlands
+
 ```{r}
 olentangy <- read.csv(paste(dataDIR, "Olentangy.csv", sep="/"), header = T)
 head(olentangy)
@@ -587,7 +503,7 @@ plot(TPout2 ~ LD2, data=olentangy, log="xy")
 
 ```
 
-## Saving Data 
+## Saving Data
 Datasets created on this file will be used for developing the Bayesian updating model.  These data objects are saved as a `.RData` file for easy processing.
 
 ```{r}

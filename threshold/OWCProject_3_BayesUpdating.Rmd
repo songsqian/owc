@@ -12,75 +12,14 @@ editor_options:
 This Rmd file includes Bayesian updating code for the Old Woman Creek project. Data used include daily monitoring data from Old Woman Creek (divided into four seasons), Crane Creek, Coldwater Creek, and Olentangy.  The code in the previous Rmd files generate necessary input data and prior distributions for model parameters. 
 
 ```{r setup, include=FALSE}
-## functions and setup
-to2 <- function(x){
-    ## conver a single digit integer to 0x
-    return(ifelse (x<10, paste("0",x, sep=""), as.character(x)))
-}
-
-hockey_smooth <- function(x, beta0, beta1=0, delta, phi, theta=NULL)
-{
-    if (is.null(theta)) theta=0.01*diff(range(x))
-    return(beta0 + beta1 * (x-phi) +
-           delta * theta * log1p(exp((x-phi)/theta)))
-}
-
-line.plots <- function(est, se, Ylabel, Xlab, yaxis=2, Xlim=NULL,
-                       rscale=F, At=NULL, Lab=NULL, V=0){
-    if (is.null(Xlim)) Xlim <- range(c(est+2*se, est-2*se))
-    n <- length(est)
-    if(n != length(se))stop("lengths not match")
-    plot(1:n, 1:n, xlim=Xlim, ylim=c(0.75, n+0.25),
-         type="n", axes=F, xlab=Xlab, ylab="")
-    if (rscale)
-        axis(1, at=At, labels=Lab)
-    else
-        axis(1)
-    axis(yaxis, at=1:n, labels=Ylabel, las=1)
-    segments(y0=1:n, y1=1:n, x0=est-2*se, x1=est+2*se)
-    segments(y0=1:n, y1=1:n, x0=est-1*se, x1=est+1*se, lwd=2.5)
-    points(est, 1:n)
-    if (!is.null(V)) abline(v=V, col="gray")
-    invisible()
-}
-
-packages<-function(x, repos="http://cran.r-project.org", ...){
-    x<-as.character(match.call()[[2]])
-    if (!require(x,character.only=TRUE)){
-        install.packages(pkgs=x, repos=repos, ...)
-        require(x,character.only=TRUE)
-    }
-}
-
-packages(tidyverse)
-
-packages(ggplot2)
-packages(rv)
-packages(arm)
-packages(lattice)
-packages(tikzDevice)
-packages(car)
-packages(formatR)
-packages(rstan)
-
-rstan_options(auto_write = TRUE)
-options(mc.cores = min(c(parallel::detectCores(), 8)))
-
-nchains <-  min(c(parallel::detectCores(), 8))
-niters <- 100000
-nkeep <- 2500
-nthin <- ceiling((niters/2)*nchains/nkeep)
-
+source("FrontMatter.R")
+load("owc_data.RData")
 ```
 ## Importing Data
-
 
 ```{r read}
 base <- getwd()
 dataDIR <- paste(base, "Data", sep="/")
-
-load("owc_data.RData")
-
 ```
 
 # Bayesian Updating
@@ -91,14 +30,13 @@ The Bayesian updating starts from the hierarchically fit OWC model. This is the 
 
 Model outputs are used for (1) presenting estimated P loading thresholds and (2) deriving prior distributions for the next model run.
 
-The derived priors are used for model updating. For simplicity, we will assume model parameters are a priori independent of each other (an assumption that requires centering the predictor) and a
-normal-inverse-gamma conjugate prior.  That is, for each parameter $\theta$ ($=\{ \beta_0, \delta,\phi\}$), we use 
+The derived priors are used for model updating. For simplicity, we will assume model parameters are a priori independent of each other (an assumption that requires centering the predictor) and a normal-inverse-gamma conjugate prior.  That is, for each parameter $\theta$ ($=\{ \beta_0, \delta,\phi\}$), we use 
 $$
 \begin{array}{rcl}
 \theta & \sim & N(\mu_\theta, \sigma_\theta^2)\\
 \mu_\theta | \sigma^2_\theta &\sim& N(\mu^0_{\theta},
 \sigma^2_{\theta}/\lambda_\theta)\\ \sigma^2_\theta &\sim&
-\Gamma^{-1}(\alpha_{\theta}, \beta_{\theta}) \end{array}
+Inv-gamma(\alpha_{\theta}, \beta_{\theta}) \end{array}
 $$
 
 Using the method of moments, we can estimate the prior distribution parameter using the MCMC summaries (mean and variance) of each parameters. That is, the means and variances of the Normal-Inverse-Gamma distribution are:
@@ -356,19 +294,21 @@ input.to.stan <- stan.in2(grp=owc_daily$Season=="Spring", info=F, prrs=prr,
 muxQ1 <- input.to.stan$mux
 sdxQ1 <- input.to.stan$sdx
 thetaQ1 <- input.to.stan$data$theta
+```
 
+Now fitting the stan model
+```{r}
 fit <- stan_model(model_code = stan_model3)
 fit3 <- sampling(fit, data = input.to.stan$data, 
-             init=input.to.stan$inits,
+#             init=input.to.stan$inits,
 	           pars = input.to.stan$para,
 	           iter=niters, thin=nthin, chains=input.to.stan$n.chains,
 	           control = list(adapt_delta = 0.99, max_treedepth=20))
 save(fit3, muxQ1, sdxQ1, thetaQ1, file="owcTPma05SN_Q1_STDZ.RData")
 ##load("owcTPma05SN_Q1_STDZ.RData")
 ```
-The updated output needs to be transformed back to its original scale. As a default, I fit the model using normalized loading, with the normalizing constants saved in the input data list.  After each
-updating run, the resulting model parameters are converted back to their original scale:
 
+The updated output needs to be transformed back to its original scale. As a default, I fit the model using normalized loading, with the normalizing constants saved in the input data list.  After each updating run, the resulting model parameters are converted back to their original scale:
 
 ```{r}
 fitcoefQ1 <- rvsims(as.matrix(as.data.frame(rstan::extract(fit3, permute=T))))
@@ -392,7 +332,7 @@ sdxQ2 <- input.to.stan$sdx
 thetaQ2 <- input.to.stan$data$theta
 
 fit <- stan_model(model_code = stan_model3)
-fit4 <- sampling(fit=fit, data = input.to.stan$data, 
+fit4 <- rstan::sampling(fit, data = input.to.stan$data, 
                  init=input.to.stan$inits,
                  pars = input.to.stan$para,
                  iter=niters, thin=nthin, chains=input.to.stan$n.chains,
@@ -437,7 +377,7 @@ sdxQ4 <- input.to.stan$sdx
 thetaQ4 <- input.to.stan$data$theta
 
 fit <- stan_model(model_code = stan_model3)
-fit6 <- sampling(fit=fit, data = input.to.stan$data, init=input.to.stan$inits,
+fit6 <- sampling(fit, data = input.to.stan$data, init=input.to.stan$inits,
 	    pars = input.to.stan$para,
 	    iter=niters, thin=nthin, chains=input.to.stan$n.chains,
 	    control = list(adapt_delta = 0.99, max_treedepth=20))
@@ -587,7 +527,8 @@ mtext("TP concentration (mg/L)", 2, 0.75, T, las=0)
                        breaks=c(0.05,0.1,0.25,0.5), labels=c("0.05","0.1","0.25","0.5"), trans="log") + 
     geom_ribbon(aes(x=maTPLD05, ymin=exp(X2.5), ymax=exp(X97.5)), alpha=0.3) + 
     geom_line(aes(x=maTPLD05, y=exp(mean)), lwd=1.25)
-  png(file="seasonalUPFig.png", height=5*120, width=6.5*120)
+  ## png(file="seasonalUPFig.png", height=5*120, width=6.5*120)
+  tikz(file="seasonalUPFig.tex", height=5, width=6.5, standAlone = F)
   print(p+facet_wrap(~Season, ncol=2))
   dev.off()
 ```
@@ -616,18 +557,15 @@ muxCC12 <- input.to.stan$mux
 sdxCC12 <- input.to.stan$sdx
 thetaCC12 <- input.to.stan$data$theta
 
-fit <- stan(model_code = stan_model3,
-	    data = input.to.stan$data, init=input.to.stan$inits,
-	    pars = input.to.stan$para,
-	    iter=5, chains=input.to.stan$n.chains)
-fitCC2012 <- stan(fit=fit, data = input.to.stan$data, input.to.stan$inits,
+fit <- stan_model(model_code = stan_model3)
+fitCC2012 <- sampling(fit, data = input.to.stan$data, #input.to.stan$inits,
                   pars = input.to.stan$para,
                   iter=niters, thin=nthin, chains=input.to.stan$n.chains,
                   control = list(adapt_delta = 0.99, max_treedepth=20))
 save(fitCC2012, muxCC12, sdxCC12, thetaCC12, file="CraneCreek_2012_STDZ.RData")
 
 ## load("CraneCreek_2012_STDZ.RData")
-fitcoefCC12 <- rvsims(as.matrix(as.data.frame(extract(fitCC2012, permute=T))))
+fitcoefCC12 <- rvsims(as.matrix(as.data.frame(rstan::extract(fitCC2012, permute=T))))
 fitcoefCC12$delta <- fitcoefCC12$delta/sdxCC12
 fitcoefCC12$phi <- muxCC12+fitcoefCC12$phi*sdxCC12
 fitcoefCC12_sum <- summary(fitcoefCC12)
@@ -643,18 +581,15 @@ muxCC13 <- input.to.stan$mux
 sdxCC13 <- input.to.stan$sdx
 thetaCC13 <- input.to.stan$data$theta
 
-fit <- stan(model_code = stan_model3,
-	    data = input.to.stan$data, init=input.to.stan$inits,
-	    pars = input.to.stan$para,
-	    iter=5, chains=input.to.stan$n.chains)
-fitCC2013 <- stan(fit=fit, data = input.to.stan$data, input.to.stan$inits,
+fit <- stan_model(model_code = stan_model3)
+fitCC2013 <- sampling(fit, data = input.to.stan$data, #input.to.stan$inits,
                   pars = input.to.stan$para,
                   iter=niters, thin=nthin, chains=input.to.stan$n.chains,
                   control = list(adapt_delta = 0.99, max_treedepth=20))
 save(fitCC2013, muxCC13, sdxCC13, thetaCC13, file="CraneCreek_2013_STDZ.RData")
 
 ## load("CraneCreek_2013_STDZ.RData")
-fitcoefCC13 <- rvsims(as.matrix(as.data.frame(extract(fitCC2013, permute=T))))
+fitcoefCC13 <- rvsims(as.matrix(as.data.frame(rstan::extract(fitCC2013, permute=T))))
 fitcoefCC13$delta <- fitcoefCC13$delta/sdxCC13
 fitcoefCC13$phi <- muxCC13+fitcoefCC13$phi*sdxCC13
 fitcoefCC13_sum <- summary(fitcoefCC13)
@@ -669,11 +604,8 @@ muxCC14 <- input.to.stan$mux
 sdxCC14 <- input.to.stan$sdx
 thetaCC14 <- input.to.stan$data$theta
 
-fit <- stan(model_code = stan_model3,
-	    data = input.to.stan$data, init=input.to.stan$inits,
-	    pars = input.to.stan$para,
-	    iter=5, chains=input.to.stan$n.chains)
-fitCC2014 <- stan(fit=fit, data = input.to.stan$data, input.to.stan$inits,
+fit <- stan_model(model_code = stan_model3)
+fitCC2014 <- sampling(fit, data = input.to.stan$data, #input.to.stan$inits,
                   pars = input.to.stan$para,
                   iter=niters, thin=nthin, chains=input.to.stan$n.chains,
                   control = list(adapt_delta = 0.99, max_treedepth=20))
@@ -681,8 +613,8 @@ save(fitCC2014, muxCC14, sdxCC14, thetaCC14, file="CraneCreek_2014_STDZ.RData")
 
 ## load("CraneCreek_2014_STDZ.RData")
 ## 2014 had no threshold -- all input loadings are very high.
-tempFit2<- rvsims(as.matrix(as.data.frame(extract(fit2, permute=T))))
-fitcoefCC14 <- rvsims(as.matrix(as.data.frame(extract(fitCC2014, permute=T))))
+tempFit2<- rvsims(as.matrix(as.data.frame(rstan::extract(fit2, permute=T))))
+fitcoefCC14 <- rvsims(as.matrix(as.data.frame(rstan::extract(fitCC2014, permute=T))))
 if (is.na(summary(fitcoefCC14$delta)[4])) fitcoefCC14$delta <- tempFit2$De
 if (is.na(summary(fitcoefCC14$phi)[4])) fitcoefCC14$phi <- tempFit2$Ph
 
@@ -783,6 +715,31 @@ axis(1, at=log(c(0.01,0.05, 0.1,0.5, 1,2)),
   mtext("TP loading (ton/yr)", 1, 0.75,T)
 mtext("TP concentration (mg/L)", 2, 0.75, T, las=0)
 
+dev.off()
+
+## Using ggplot
+
+  df <- dplyr::select(ottawa_weekly, TPload_in, TP_out, Year) %>% arrange(Year, TPload_in) %>%
+    filter(TPload_in>0, !is.na(TPload_in))
+  sp <- df$Year==2012
+    df_sp <- summary(hockey(x=log(df$TPload_in[sp]), fitcoefCC12[1], fitcoefCC12[2], fitcoefCC12[3]))
+  sm <- df$Year==2013
+    df_sm <- summary(hockey(x=log(df$TPload_in[sm]), fitcoefCC13[1], fitcoefCC13[2], fitcoefCC13[3]))
+  au <- df$Year==2014
+    df_au <- summary(hockey(x=log(df$TPload_in[au]), fitcoefCC14[1], fitcoefCC14[2], fitcoefCC14[3]))
+  df_gg <- cbind(df, rbind(df_sp, df_sm, df_au))  
+  df_gg$Season <- ordered(df_gg$Year)
+  names(df_gg) <- c("TPload_in","TP_out","Year",   "mean",     "sd",       "X1",  "X2.5",  "X25",   "X50",  "X75",  "X97.5",    "X99",      "sims")
+  p <- ggplot(df_gg, aes(x=TPload_in, y=TP_out)) + geom_point(color="blue", size=0.75)+
+    scale_x_continuous(name = "TP Loading (ton/yr)", breaks=c(0.01,0.1,1,10,75), 
+                       labels=c("0.01","0.1","1","10","75"), trans="log")+
+    scale_y_continuous(name = "TP Effluent Concentration (mg/L)", 
+                       breaks=c(0.05,0.1,0.25,0.5), labels=c("0.05","0.1","0.25","0.5"), trans="log") + 
+    geom_ribbon(aes(x=TPload_in, ymin=exp(X2.5), ymax=exp(X97.5)), alpha=0.3) + 
+    geom_line(aes(x=TPload_in, y=exp(mean)), lwd=1.25)
+  ## png(file="seasonalUPFig.png", height=5*120, width=6.5*120)
+  tikz(file="CraneCreek_Year.tex", height=2.75, width=6.5, standAlone = F)
+  print(p+facet_wrap(~Year, nrow=1))
   dev.off()
 
 ### Crane Creek output
@@ -823,7 +780,7 @@ sdxCWC <- input.to.stan$sdx
 thetaCWC <- input.to.stan$data$theta
 
 fit <- stan_model(model_code = stan_model3)
-fitCWC <- sampling(fit, data = input.to.stan$data, init=input.to.stan$inits,
+fitCWC <- sampling(fit, data = input.to.stan$data, ##init=input.to.stan$inits,
                   pars = input.to.stan$para,
                   iter=niters, thin=nthin, chains=input.to.stan$n.chains,
                   control = list(adapt_delta = 0.99, max_treedepth=20))
@@ -879,8 +836,9 @@ p <- ggplot(data=df_cwc, aes(x=TPLoading, y=TP_out))+geom_point(color="blue", si
     geom_ribbon(aes(x=TPLoading, ymin=exp(X2.5), ymax=exp(X97.5)), alpha=0.3) + 
     geom_line(aes(x=TPLoading, y=exp(mean)), lwd=1.25)
 
-png(file="cwc_post.png", height=3*120, width=4.75*120)
-p
+##png(file="cwc_post.png", height=3*120, width=4.75*120)
+tikz("cwc_post.tex", height=3, width=4.75, standAlone = F)
+print(p)
 dev.off()
 ```
 
@@ -901,7 +859,7 @@ thetaCWC_n <- input.to.stan$data$theta
 
 fit <- stan_model(model_code = stan_model3)
 fitCWC_n <- sampling(fit, data = input.to.stan$data, 
-                     init=input.to.stan$inits,
+##                     init=input.to.stan$inits,
                      pars = input.to.stan$para,
                      iter=niters, thin=nthin, chains=input.to.stan$n.chains,
                      control = list(adapt_delta = 0.99, max_treedepth=20))
@@ -926,8 +884,9 @@ p <- ggplot(data=df_cwc_n, aes(x=TPload, y=TP_out))+geom_point(color="blue", siz
     scale_y_continuous(name = "TP Effluent Concentration (mg/L)", 
                        breaks=c(0.1,0.2,0.5,0.75,1), labels=c("0.1","0.2","0.5", "0.75", "1"), trans="log") 
 
-png(file="cwc_post_update.png", height=3*120, width=4.75*120)
-p
+##png(file="cwc_post_update.png", height=3*120, width=4.75*120)
+tikz("cwc_post_update.tex", height=3, width=4.75, standAlone = F)
+print(p)
 dev.off()
 
 ```
@@ -956,7 +915,7 @@ fitOlt1 <- sampling(fit, data = input.to.stan$data, #init=input.to.stan$inits,
                   iter=niters, thin=nthin, chains=input.to.stan$n.chains,
                   control = list(adapt_delta = 0.99, max_treedepth=20))
 
-fitcoefOlt1 <- rvsims(as.matrix(as.data.frame(extract(fitOlt1, permute=T))))
+fitcoefOlt1 <- rvsims(as.matrix(as.data.frame(rstan::extract(fitOlt1, permute=T))))
 fitcoefOlt1$delta <- fitcoefOlt1$delta/sdxOlt1
 fitcoefOlt1$phi <- muxOlt1+fitcoefOlt1$phi*sdxOlt1
 fitcoefOlt1_sum <- summary(fitcoefOlt1)
@@ -972,12 +931,12 @@ sdxOlt2 <- input.to.stan$sdx
 thetaOlt2 <- input.to.stan$data$theta
 
 fit <- stan_model(model_code = stan_model3)
-fitOlt2 <- stan(fit=fit, data = input.to.stan$data, ##input.to.stan$inits,
+fitOlt2 <- sampling(fit, data = input.to.stan$data, ##input.to.stan$inits,
                   pars = input.to.stan$para,
                   iter=niters, thin=nthin, chains=input.to.stan$n.chains,
                   control = list(adapt_delta = 0.99, max_treedepth=20))
 
-fitcoefOlt2 <- rvsims(as.matrix(as.data.frame(extract(fitOlt2, permute=T))))
+fitcoefOlt2 <- rvsims(as.matrix(as.data.frame(rstan::extract(fitOlt2, permute=T))))
 fitcoefOlt2$delta <- fitcoefOlt2$delta/sdxOlt2
 fitcoefOlt2$phi <- muxOlt2+fitcoefOlt2$phi*sdxOlt2
 fitcoefOlt2_sum <- summary(fitcoefOlt2)
@@ -1065,8 +1024,9 @@ p <- ggplot(data=df_olt, aes(x=TPLoading, y=TPout))+geom_point(color="blue", siz
   geom_ribbon(aes(x=TPLoading, ymin=exp(X2.5), ymax=exp(X97.5)), alpha=0.3) + 
   geom_line(aes(x=TPLoading, y=exp(mean)), lwd=1.25)
 
-png(file="olt_post.png", height=3*120, width=5*120)
-p + facet_wrap(~Wetland, nrow = 1)
+##png(file="olt_post.png", height=2.75*120, width=5.5*120)
+tikz(file="olt_post.tex", height=2.75, width=5.5, standAlone = F)
+print(p + facet_wrap(~Wetland, nrow = 1))
 dev.off()
 
 ```
@@ -1106,7 +1066,7 @@ box()
 dev.off()
 
 ## using ggplot
-seasonal$name <- c("OWC", "OWC_sp", "OWC_sm", "OWC_fl", "OWC_wn", "CC_12", "CC_13", "CC_14", "CWC", "CWC_update", "Olt1", "Olt2")
+seasonal$name <- c("OWC", "OWC\\_sp", "OWC\\_sm", "OWC\\_fl", "OWC\\_wn", "CC\\_12", "CC\\_13", "CC\\_14", "CWC", "CWC\\_update", "Olt1", "Olt2")
 d <- seasonal[-(2:5),]
 names(d) <- c( "name",  "mean",  "sd",    "X1",    "X2.5",  "X25",   "X50",   "X75",   "X97.5", "X99",   "sims" )
 p <- ggplot(data=d, aes(x=name)) + 
@@ -1130,8 +1090,9 @@ geom_point(mapping=aes(y=mean), size=3, shape=21, fill="white") +
 scale_y_continuous(name="Threshold (ton/yr)", breaks = log(c(0.01,0.1,1,10,100)), 
                    labels = as.character(c(0.01,0.1,1,10,100))) + 
   scale_x_discrete(name=NULL)
-png(file="allwetlands4.png", width=4*120, height=4.75*120)
-print(p + coord_flip())
+##png(file="allwetlands4.png", width=4*120, height=4.75*120)
+tikz(file="allwetlands4.tex", width=4, height=4.75, standAlone = F)
+  print(p + coord_flip())
 dev.off()
 
 ## saving output
@@ -1141,203 +1102,4 @@ seasonal2 <- rbind(summary(exp(fit2coefSN[3])), summary(exp(fitcoefQ1[3])), summ
                   summary(exp(fitcoefOlt1[3])), summary(exp(fitcoefOlt2[3])))
 seasonal2$name <- c("OWC", "OWC_sp", "OWC_sm", "OWC_fl", "OWC_wn", "CC_12", "CC_13", "CC_14", "CWC", "CWC_update", "Olt1", "Olt2")
 write.csv(seasonal2, file="changepoint.csv")
-```
-
-# Bayesian Sample Size Estimation
-
-Using Monte Carlo simulation, we draw random samples of various sizes based on existing estimates of the hockey stick model parameters. For each set of samples, another model is fit to estimate model parameters.  The results will be presented as a plot of the estimated threshold (with its 90% credible interval) as a function of sample size.  We use the Coldwater Creek data as an example.
-
-```{r}
-prr <- prior(fit2)
-
-## input file:
-stan.inSZ <- function(x, y, n.chains=4, prrs = prr, sz){
-        n <- length(x)
-        m0 = prrs$m0
-        mD = prrs$mD
-        mP = prrs$mP
-        lmbd0=prrs$lmbd0
-        lmbdD=prrs$lmbdD
-        lmbdP=prrs$lmbdP
-        al0=prrs$al0
-        alP=prrs$alP
-        alD=prrs$alD
-        bt0=prrs$bt0
-        btP=prrs$btP
-        btD=prrs$btD
-  
-        s0 <- sqrt(bt0/(al0-1))
-        sD <- sqrt(btD/(alD-1))
-        sP <- sqrt(btP/(alP-1))
-    
-        inits <- list()
-        theta <- 0.04
-        bugs.data <- list(N=n, y=y, x=x,
-                          theta=theta, beta1=0,
-                          m0 = m0,  mD = mD, mP = mP,
-                          lmbd0=lmbd0, lmbdD=lmbdD, lmbdP=lmbdP,
-                          al0=al0, alP=alP, alD=alD,
-                          bt0=bt0, btP=btP, btD=btD )
-        for (i in 1:n.chains)
-        	inits[[i]] <- list(beta0=rnorm(1, m0, s0),
-	                           delta=runif(1),
-		 	                       phi=runif(1, range(x)[1], range(x)[2]),
-                    			   sigma=runif(1), sigmaPsq=runif(1),
-                        		 sigmaDsq=runif(1), sigma0sq=runif(1),
-                             mu0=rnorm(1, m0, s0), 
-                    			   muD=rnorm(1, mD,sD),
-                             muP=rnorm(1, mP, sP))
-    para <- c("beta0", "delta", "phi","sigma",
-              "mu0","muD","muP", "sigma0","sigmaD","sigmaP")
-    return(list(para=para, data=bugs.data,
-                inits=inits,n.chains=n.chains, sz=sz))
-}
-##cwc data
-tmp <- cwc_month$flow!=0
-load("ColdCreek_STDZ.RData")
-fitcoefCWC_temp <- summary(rvsims(as.matrix(as.data.frame(extract(fitCWC, permute=T))))) ## using standardized only
-fit <- stan_model(model_code = stan_model3)
-
-## sample size
-
-sim_sz <- function(n=12, k=100, stanmodel=fit, prior_coef=fitcoefCWC_temp){
-     fitcoefSZ_sim <- list(phi=rvsims(0), 
-                           beta0=rvsims(0), 
-                           delta=rvsims(0))
-     for (i in 1:k){
-        print(paste(i, "of", k, ", sample size =", n))
-        x <- rnorm(n)
-        mnY <- hockey_smooth(x, prior_coef[1,2] , 0,
-                                prior_coef[2,2] ,
-                                prior_coef[3,2] ,
-                                0.04)
-        y <- rnorm(n, mnY, prior_coef[4,2])
-
-        input.to.stan <- stan.inSZ(x, y, sz=n)
-        fit_sim <- sampling(fit, data = input.to.stan$data,   
-                            init = input.to.stan$inits,
-                            pars = input.to.stan$para,
-                            iter = niters, thin=nthin, 
-                            chains=input.to.stan$n.chains,
-                            control=list(adapt_delta = 0.99, 
-                                         max_treedepth=25))
-        temp_sim <-  rvsims(as.matrix(as.data.frame(extract(fit_sim, permute=T))))
-        fitcoefSZ_sim$beta0 <- fitcoefSZ_sim$beta0 + temp_sim[1]/k
-        fitcoefSZ_sim$delta <- fitcoefSZ_sim$delta + temp_sim[2]/k
-        fitcoefSZ_sim$phi <- fitcoefSZ_sim$phi + temp_sim[3]/k
-     }
-     return(fitcoefSZ_sim)
-}
-
-n <- (1:10)*12
-
-smplsz_sim <- list()
-for (j in 1:4)
-  smplsz_sim[[j]] <- sim_sz(n=n[j])
-
-for (j in 5:6)
-  smplsz_sim[[j]] <- sim_sz(n=n[j])
-
-for (j in 7:8)
-  smplsz_sim[[j]] <- sim_sz(n=n[j])
-
-for (j in 9:10)
-  smplsz_sim[[j]] <- sim_sz(n=n[j])
-
-save(smplsz_sim, file="CWC_SZ_sim.RData")
-load("CWC_SZ_sim.RData")
-
-```
-
-Results are presented graphically by comparing the estimated model coefficients, especially the estimated threshold.
-
-```{r}
-j=0
-sim_plot_phi <- NULL
-for (i in n) {
-  j=j+1
-  sim_plot_phi <- rbind(sim_plot_phi, c(i, unlist(summary(smplsz_sim[[j]]$phi))))
-}
-sim_plot_phi <- as.data.frame(sim_plot_phi)
-
-j=0
-sim_plot_beta0 <- NULL
-for (i in n) {
-  j=j+1
-  sim_plot_beta0 <- rbind(sim_plot_beta0, c(i, unlist(summary(smplsz_sim[[j]]$beta0))))
-}
-sim_plot_beta0 <- as.data.frame(sim_plot_beta0)
-
-j=0
-sim_plot_delta <- NULL
-for (i in n) {
-  j=j+1
-  sim_plot_delta <- rbind(sim_plot_delta, c(i, unlist(summary(smplsz_sim[[j]]$delta))))
-}
-sim_plot_delta <- as.data.frame(sim_plot_delta)
-
-tikz(file="sz_sim.tex", width=6, height=4, standAlone=F)
-par(mfrow=c(1,3), mar=c(4, 4, 1, 1), mgp=c(1.25,0.125, 0), 
-    las=1, tck=0.01)
-line.plots(sim_plot_phi$mean, sim_plot_phi$sd, 
-           Xlab="Threshold (ton/yr)",
-           Ylabel=sim_plot_phi[,1],
-           rscale=T,
-           At=log(seq(0.3, 0.8, 0.1)),
-           Lab=as.character(seq(0.3,0.8,0.1)),
-           V=NULL)
-box()
-
-line.plots(sim_plot_beta0$mean, sim_plot_beta0$sd, 
-           Xlab="Intercept",
-           Ylabel=sim_plot_beta0[,1],
-           rscale=T,
-           V=NULL)
-box()
-
-line.plots(sim_plot_delta$mean, sim_plot_delta$sd, 
-           Xlab="Slope change",
-           Ylabel=sim_plot_delta[,1],
-           rscale=T,
-           V=NULL)
-box()
-
-dev.off()
-
-tikz(file="sz_simPhi.tex", width=3, height=4.75, standAlone=F)
-par(mar=c(4, 4, 1, 1), mgp=c(1.25,0.125, 0), 
-    las=1, tck=0.01)
-line.plots(sim_plot_phi$mean, sim_plot_phi$sd, 
-           Xlab="Threshold (ton/yr)",
-           Ylabel=sim_plot[,1],
-           rscale=T,
-           At=log(seq(0.3, 0.8, 0.1)),
-           Lab=as.character(seq(0.3,0.8,0.1)),
-           V=NULL)
-box()
-dev.off()
-
-tikz(file="sz_simBeta0.tex", width=3, height=4.75, standAlone=F)
-par(mar=c(4, 4, 1, 1), mgp=c(1.25,0.125, 0), 
-    las=1, tck=0.01)
-line.plots(sim_plot_beta0$mean, sim_plot_beta0$sd, 
-           Xlab="Intercept",
-           Ylabel=sim_plot[,1],
-           rscale=T,
-           V=NULL)
-box()
-dev.off()
-
-tikz(file="sz_simDelta.tex", width=3, height=4.75, standAlone=F)
-par(mar=c(4, 4, 1, 1), mgp=c(1.25,0.125, 0), 
-    las=1, tck=0.01)
-line.plots(sim_plot_delta$mean, sim_plot_delta$sd, 
-           Xlab="Slope Change",
-           Ylabel=sim_plot[,1],
-           rscale=T,
-           V=NULL)
-box()
-dev.off()
-
-
 ```

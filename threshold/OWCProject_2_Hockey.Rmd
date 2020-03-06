@@ -3,56 +3,29 @@ title: "OWCProjectHockey"
 author: "Song Qian"
 date: "4/1/2019"
 output: html_document
-editor_options: 
+editor_options:
   chunk_output_type: console
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
-
-packages<-function(x, repos="http://cran.r-project.org", ...){
-    x<-as.character(match.call()[[2]])
-    if (!require(x,character.only=TRUE)){
-        install.packages(pkgs=x, repos=repos, ...)
-        require(x,character.only=TRUE)
-    }
-}
-
-hockey <- function(x, beta0, beta1, phi) return(beta0+beta1*(x-phi)*(x>phi))
-hockey_smooth <- function(x, beta0, beta1=0, delta, phi, theta=NULL)
-{
-    if (is.null(theta)) theta=0.01*diff(range(x))
-    return(beta0 + beta1 * (x-phi) +
-           delta * theta * log1p(exp((x-phi)/theta)))
-}
-
+source("FrontMatter.R")
 load("owc_data.RData")
 ```
+## Introduction
 
+In this document, we present R code for fitting the Bayesian hockey stick model and the hierarchical hockey stick model.  We use the smoothed hockey stick model to improve numerical stability.  The smoothed hockey stick model is a nonlinear regression problem. Although a simple nonlinear least squares method would be sufficient, we include the Bayesian nonlinear code here as the starting point for the Bayesian hierarchical model.
 
-## Fitting the Smoothed Hockey-Stick Model
+## Fitting the Smoothed Hockey Stick Model
 
-First, try the hockey stick model code without considering multilevel structure
-```{r, include=F}
-packages(rstan)
-packages(rv)
-
-rstan_options(auto_write = TRUE)
-options(mc.cores = min(c(parallel::detectCores(), 8)))
-
-nchains <-  min(c(parallel::detectCores(), 8))
-niters <- 100000
-nkeep <- 2500
-nthin <- ceiling((niters/2)*nchains/nkeep)
-
-```
+We fit the hockey stick model code without considering multilevel structure, a Bayesian nonlinear regression problem.
 
 Using the five-day moving average of TP loading to OWC as the predictor variable.
 
-First, all data (without considering seasons).  The following code chunk includes a function for generating Stan model input data and initial values, and the Stan model.  For all our Bayesian models, we assume that the slope of the first line segment is 0. 
+First, all data (without considering seasons).  The following code chunk includes a function for generating Stan model input data and initial values, and the Stan model.  For all our Bayesian models, we assume that the slope of the first line segment is 0.
+
 ```{r}
 
-## input function
+## input function -- organizing input data to Bayesian model
 stan.in0 <- function(infile=owc_daily, x="maTPLD05", y="TP_ef",
                     n.chains=4, stdz=F){
     keep <- (infile[,x] > 0) & (infile[,y] >0)
@@ -67,24 +40,16 @@ stan.in0 <- function(infile=owc_daily, x="maTPLD05", y="TP_ef",
       xsd <- 1
       }
     y <- log(infile[,y])
-##    gr <- as.numeric(ordered(infile[,3], levels=c("Spring", "Summer", "Autumn")))
     n <- dim(infile)[1]
-##    R <- max(gr)
     inits <- list()
     if (stdz) theta <- 0.04
     else theta <- 0.01*diff(range(x))
     bugs.data <- list(N=n, y=y, x=x, theta=theta, beta1=0)
     for (i in 1:n.chains)
-	inits[[i]] <- list(beta0=rnorm(1), delta=runif(1),
-			   phi=runif(1, range(x)[1], range(x)[2]),
-                           ##re0=rep(0, R), re1=rep(0,R), reD=rep(0,R), reP=rep(0,R),
-                           sigma=runif(1)
-                           ##sigma0=runif(1),sigmaD=runif(1), sigmaP=runif(1)
-                           )
-    para <- c("beta0", "delta", "phi", 
-	      ##"re0", "re1", "reD", "reP",
-	      "sigma"#, "sigma0","sigma1","sigmaD","sigmaP"
-              )
+    	inits[[i]] <- list(beta0=rnorm(1), delta=runif(1),
+		                 	   phi=runif(1, range(x)[1], range(x)[2]),
+                         sigma=runif(1))
+    para <- c("beta0", "delta", "phi", "sigma")
     return(list(para=para, data=bugs.data, inits=inits,
                 n.chains=n.chains, mux=xmu, sdx=xsd))
 }
@@ -94,28 +59,17 @@ stan.in0 <- function(infile=owc_daily, x="maTPLD05", y="TP_ef",
 	  data{
 	  int N; //the number of observations
 	  vector[N] y; //the response
-	  vector[N] x; 
-	  /*int R;
-	  int region[N];*/
+	  vector[N] x;
 
 	  real theta;
           real beta1;
 	}
 	parameters {
 	  real beta0; //the regression parameters
-	  /*real beta1;*/ 
+	  /*real beta1;*/
 	  real<lower=0> delta;
 	  real phi; //change point
-
-/*	  vector[R] re0;
-	  vector[R] re1;
-	  vector[R] reP;
-	  vector[R] reD;*/
 	  real<lower=0> sigma;
-/*	  real<lower=0> sigma0;
-	  real<lower=0> sigma1;
-	  real<lower=0> sigmaD;
-	  real<lower=0> sigmaP;*/
 	}
 	transformed parameters {
 	  vector[N] mu;
@@ -124,35 +78,29 @@ stan.in0 <- function(infile=owc_daily, x="maTPLD05", y="TP_ef",
 		    delta * theta *
 			    log1p(exp((x[i]-phi)/theta));
 	}
-	model {  
+	model {
 	  phi ~ cauchy(0,1);
 	  beta0 ~ normal(0,5);
-	 /* beta1 ~ normal(0,1);*/
 	  delta ~ normal(0,5);
 
 	  sigma ~ cauchy(0, 1);
-	/*  sigma0 ~ cauchy(0, 1);
-	  sigma1 ~ cauchy(0, 1);
-	  sigmaD ~ cauchy(0, 1);
-	  sigmaP ~ cauchy(0, 1);
-
-	  re0 ~ normal(0, sigma0);
-	  re1 ~ normal(0, sigma1);
-	  reD ~ normal(0, sigmaD);
-	  reP ~ normal(0, sigmaP); */
 
 	  y ~ normal(mu, sigma);
-       }
+   }
     "
 
 ```
+
 All Stan models will be fit in the following steps:
+
 - Creating input data file, using standardized predictor (TP loading).  The input data file includes the mean and standard deviation of TP loading data for later use.
-- Compiling the Stan model without running to create a model object
+- Compiling the Stan model to create a model object
 - Updating (MCMC runs)
 - Extracting Stan output
 - Reconstructing (original, un-standardizing) relevant model parameters ($\phi$ and $\delta$)
-- Saving the Stan fit object and extracted coefficients. 
+- Saving the Stan fit object and extracted coefficients
+- Summarizing and plotting
+
 ```{r}
 ## step 1 -- input data file
 input.to.bugs <- stan.in0(n.chains=nchains)
@@ -161,7 +109,7 @@ input.to.bugs <- stan.in0(n.chains=nchains)
 fit_compile <- stan_model(model_code = stan_model)
 
 ## step 3 -- MCMC run
-fit <- sampling(fit_compile, data = input.to.bugs$data, 
+fit <- sampling(fit_compile, data = input.to.bugs$data,
                 init = input.to.bugs$inits,
                 pars = input.to.bugs$para,
                 iter = niters, thin=nthin,
@@ -179,33 +127,17 @@ fit2coef_sum <- summary(fit2coef)
 ## step 5 -- saving
 save(fit, fit2coef, file="owcTPma05.RData")
 
-## Plotting
-  tikz(file="combinedFig.tex", width=4, height=2.25, standAlone = F)
-  par(mar=c(3,3,1,0.5), mgp=c(1.5,0.1,0), las=1, tck=0.01)
+## step 6 -- Plotting (for poster)
   xx <- log(owc_daily$maTPLD05)
   yy <- log(owc_daily$TP_ef)
-  plot(xx,yy,type="n", xlab="log TP loading", ylab="TP effluent concentration")
-  for (i in 1:200){
-      j <- sample(1:length(fit2coef$beta0),1, replace=F)
-      curve(hockey_smooth(x, fit2coef$beta0[j], 0, #fit2coef$beta1[j],
-                          fit2coef$delta[j],
-                          fit2coef$phi[j],
-                          input.to.bugs$data$theta), add=T, col="grey")
-  }
-  points(log(owc_daily$maTPLD05), log(owc_daily$TP_ef))
-  curve(hockey_smooth(x, fit2coef_sum[1,7], 0, fit2coef_sum[2,7], fit2coef_sum[3,7],
-                       input.to.bugs$data$theta), add=T, lwd=2)
-  dev.off()
-  
-  ## poster plots
-  
-  ## Using ggplot2
-  ## 1 generic hockey-stick model
-  packages(latex2exp)
+
+## Using ggplot2
+## 1 generic hockey-stick model
+packages(latex2exp)
   
   png(file="hockey_gg.png", width=480, height=300)
   ggplot(data.frame(x=seq(0, 20, 0.1), y=hockey(seq(0,20,0.1), 5, 2, 10)), aes(x=x, y=y))+
-    geom_line() + 
+    geom_line() +
     annotate("text", x=4.5, y=20, label=TeX("$y=\\beta_0+\\beta_1 x, $"), adj=0)+
     annotate("text", x=7.5, y=20, label=TeX("$x \\leq \\phi$"), adj=0)+
     annotate("text", x=4.5, y=18, label=TeX("$y=\\alpha_0+\\alpha_1 x, $"), adj=0)+
@@ -214,22 +146,22 @@ save(fit, fit2coef, file="owcTPma05.RData")
     annotate("text", x=4.5, y=14, label=TeX("$y=\\beta_0+\\alpha_1 (x-\\phi) I(x-\\phi)$"), adj=0)+
     annotate("text", x=14, y=15, label=TeX("$\\alpha_1$"), adj=0)+
     annotate("text", x=5, y=5.5, label=TeX("$\\beta_1=0$"), adj=1)+
-    scale_x_continuous(name="TP Loading", breaks=10, labels = TeX("$\\phi$")) + 
+    scale_x_continuous(name="TP Loading", breaks=10, labels = TeX("$\\phi$")) +
     scale_y_continuous(name="TP Concentration", limits = c(0, 25), breaks=5, labels = TeX("$\\beta_0$"))
   dev.off()
 
 ## NADB plot
-## nadb_path <- "C:/users/EESwithR/data"  
-nadb_path <- "https://github.com/songsqian/eesR/tree/master/R/Data" 
+## nadb_path <- "C:/users/songq/EESwithR/data"
+nadb_path <- "~/OneDrive/EESwithR/2ndEd/R/Data"
 
-nadb <- read.csv(paste(nadb_path, "nadb.csv", sep="/"))  
+nadb <- read.csv(paste(nadb_path, "nadb.csv", sep="/"))
 
 png(file="nadb_gg.png", width=480, height=300)
 ggplot(nadb, aes(x=PLI, y=TPOut)) + geom_point(color="blue")+
   annotate(geom="text", x=0.025, y=7, label="From North American Treatment Wetland Database\n Knight et al (1992)", size=3, hjust=0 )+
   ylab(TeX("TP Effluent Concentration ($\\mu$g/L)"))+
-  scale_x_continuous(name=TeX("TP Loading (g m$^{-2}$ yr$^{-1}$)"), 
-                     breaks=c(0.1, 1, 25, 100, 1000), 
+  scale_x_continuous(name=TeX("TP Loading (g m$^{-2}$ yr$^{-1}$)"),
+                     breaks=c(0.1, 1, 25, 100, 1000),
                      label=c("0.1,","1", "25", "100", "1000"), trans = "log")
 dev.off()
 
@@ -247,7 +179,8 @@ dev.off()
     scale_y_continuous(name = "TP Effluent Concentration (mg/L)", breaks=log(c(0.01,0.05,0.1,0.5,1)),
                        labels=c(0.01,0.05,0.1,0.5,1))
   
-  png(file="combinedFigGG.png", width=2*4*120, height=2*2.6*120)
+##  png(file="combinedFigGG.png", width=2*4*120, height=2*2.6*120)
+  tikz(file="OWCcomb.tex", width=4, height=3, standAlone=F)
   print(pp+theme(aspect.ratio = 0.65))
   dev.off()
 ```
@@ -255,9 +188,9 @@ dev.off()
 
 The model can also be fit with the predictor standardized so that data from multiple wetlands can be combined.
 
-## Multilevel Smoothed Hockey Stick Model
+## Multilevel/Hierarchical Smoothed Hockey Stick Model
 
-The four model parameters are allowed to vary by Season or another grouping variable. 
+The four model parameters are allowed to vary by Season or another grouping variable.
 
 ```{r}
 stan.in1 <- function(infile=owc_daily, x="maTPLD05", y="TP_ef",
@@ -290,23 +223,26 @@ stan.in1 <- function(infile=owc_daily, x="maTPLD05", y="TP_ef",
                            sigma=runif(1),
                            sigma0=runif(1),sigmaD=runif(1), sigmaP=runif(1)
                            )
-    para <- c("B0", "De", "Ph", 
+    para <- c("B0", "De", "Ph",
 	      "delB0", "delD", "delPh",
 	      "sigma", "sigma0","sigmaD","sigmaP"
               )
     return(list(para=para, data=bugs.data, inits=inits,n.chains=n.chains,
                 mux=xmu, sdx=xsd))
 }
+
+## Stan model
+
     stan_model2 <- "
 	  data{
 	  int N; //the number of observations
 	  vector[N] y; //the response
-	  vector[N] x; 
+	  vector[N] x;
 	  int R;
 	  int region[N];
 
 	  real theta;
-          real beta1; 
+          real beta1;
 	}
 	parameters {
 	  real beta0; //the regression parameters
@@ -329,7 +265,7 @@ stan.in1 <- function(infile=owc_daily, x="maTPLD05", y="TP_ef",
 		    (delta+reD[region[i]]) * theta *
 			    log1p(exp((x[i]-(phi+reP[region[i]]))/theta));
 	}
-	model {  
+	model {
 	  phi ~ cauchy(0,1);
 	  beta0 ~ normal(0,5);
 	  delta ~ normal(0,5);
@@ -372,7 +308,7 @@ fit <- stan_model(model_code = stan_model2)
 fit2 <- sampling(fit, data = input.to.bugs$data,
                  init=input.to.bugs$inits,
 	               pars = input.to.bugs$para,
-                 iter=niters, thin=nthin, 
+                 iter=niters, thin=nthin,
                  chains=input.to.bugs$n.chains,
                  control = list(adapt_delta = 0.99, max_treedepth=20))
 ##load("owcTPma05SeasonSTDZ.RData")
@@ -406,49 +342,20 @@ df <- data.frame(x=xx, y=yy, fl=flow)
 df <- df[!is.na(df$fl) & df$fl > 0,]
 df$percentile <- cut(df$fl, breaks=quantile(df$fl, prob=seq(0.0, 1, 0.1)), labels=paste(seq(10,100, 10), "%", sep=""))
 
-
-tikz(file="combinedFig.tex", height=5, width=6.5, standAlone = T)
-
-par(oma=c(2, 2, 0.25,1), mar=c(1.5, 1.5, 1, 1), mgp=c(1.25,0.1,0), las=1, tck=0.01)
-plot(xx,yy,type="n", xlab="", ylab="", axes=F)
-  for (i in 1:200){
-    j <- sample(1:length(fit2coefSN$B0),1, replace=F)
-    curve(hockey_smooth(x, fit2coefSN$B0[j], 0,
-##                           fit2coefSN$B1[j]+fit2coefSN$delB1.1[j], 
-                           fit2coefSN$De[j],
-                           fit2coefSN$Ph[j],
-                           input.to.bugs$data$theta), add=T, col="grey")
-  }
-#  temp <- owc_daily$Quarter=="Q1"
-  points(log(owc_daily$maTPLD05), log(owc_daily$TP_ef))
-  curve(hockey_smooth(x, fit2coefSN_sum[1,2], 0, 
-##                         fit2coefSN_sum[2,7] + fit2coefSN_sum[9,7], 
-                         fit2coefSN_sum[2,2],
-                         fit2coefSN_sum[3,2],
-                      input.to.bugs$data$theta), add=T, lwd=2)
-  axis(2)
-
-  axis(1)
-  box()
-  mtext("log TP loading", 1, 0.75,T)
-  mtext("log TP concentration", 2, 0.75, T, las=0)
-dev.off()
-
 ## using ggplot2
 
 xrng <- range(df$x)
-df2 <- data.frame(x = seq(xrng[1], xrng[2],,50),
-                  y = hockey_smooth(seq(xrng[1], xrng[2],,50),
-                                    fit2coefSN_sum[1,2], 0, 
-             ##fit2coefSN_sum[2,7] + fit2coefSN_sum[9,7], 
+df2 <- data.frame(x = seq(xrng[1], xrng[2],length=50),
+                  y = hockey_smooth(seq(xrng[1], xrng[2],length=50),
+                                    fit2coefSN_sum[1,2], 0,
+             ##fit2coefSN_sum[2,7] + fit2coefSN_sum[9,7],
                                     fit2coefSN_sum[2,2],
-                                    fit2coefSN_sum[3,2], 
+                                    fit2coefSN_sum[3,2],
                                     input.to.bugs$data$theta))
-
     
 q <- ggplot(data=df, aes(x, y, col=percentile)) #, color=col)
-q <- q + geom_point() 
-q <- q + geom_path(data=df2, aes(x=x, y=y, col=NULL)) + 
+q <- q + geom_point()
+q <- q + geom_path(data=df2, aes(x=x, y=y, col=NULL)) +
     scale_x_continuous(breaks=log(c(0.01,0.1,1, 10, 75, 150)),
                        labels = as.character(c(0.01,0.1,1, 10, 75, 150)))+
     scale_y_continuous(breaks=log(c(0.01,0.05, 0.1, 0.25, 0.5)),
@@ -456,11 +363,11 @@ q <- q + geom_path(data=df2, aes(x=x, y=y, col=NULL)) +
     labs(x="TP Loading (ton/yr)", y="TP concentration (mg/L)")
 
 
-pdf(file="colorflow.pdf", width=5, height=3.5)  
+pdf(file="colorflow.pdf", width=5, height=3.5)
 print(q)
 dev.off()
 
-tikz(file="colorflow.tex", width=5, height=3.5, standAlone = T)  
+tikz(file="colorflow.tex", width=5, height=3.5, standAlone = T)
 print(q)
 dev.off()
 
@@ -471,20 +378,20 @@ plot(xx,yy,type="n", xlab="", ylab="", axes=F)
   for (i in 1:200){
     j <- sample(1:length(fit2coefSN$B0),1, replace=F)
     curve(hockey_smooth(x, fit2coefSN$B0[j]+fit2coefSN$delB0.1[j], 0,
-##                           fit2coefSN$B1[j]+fit2coefSN$delB1.1[j], 
+##                           fit2coefSN$B1[j]+fit2coefSN$delB1.1[j],
                            fit2coefSN$De[j]+ fit2coefSN$delD.1[j],
-                           fit2coefSN$Ph[j]+fit2coefSN$delPh.1[j], 
+                           fit2coefSN$Ph[j]+fit2coefSN$delPh.1[j],
                            input.to.bugs$data$theta), add=T, col="grey")
   }
   temp <- owc_daily$Season=="Spring"
   text(log(0.01), log(0.5), "Spring")
   points(log(owc_daily$maTPLD05[temp]), log(owc_daily$TP_ef[temp]))
   curve(hockey_smooth(x, fit2coefSN_sum[1,2] + fit2coefSN_sum[4,2], 0,
-##                         fit2coefSN_sum[2,7] + fit2coefSN_sum[9,7], 
+##                         fit2coefSN_sum[2,7] + fit2coefSN_sum[9,7],
                          fit2coefSN_sum[2,2] + fit2coefSN_sum[8,2],
                          fit2coefSN_sum[3,2] + fit2coefSN_sum[12,2],
                       input.to.bugs$data$theta), add=T, lwd=2)
-  axis(2, at=log(c(0.05,0.1,0.25,0.5)), 
+  axis(2, at=log(c(0.05,0.1,0.25,0.5)),
      labels=as.character(c(0.05,0.1,0.25,0.5)))
   box()
   
@@ -493,17 +400,17 @@ plot(xx,yy,type="n", xlab="", ylab="", axes=F)
   plot(xx,yy,type="n", xlab="", ylab="", axes=F)
   for (i in 1:200){
     j <- sample(1:length(fit2coefSN$B0),1, replace=F)
-    curve(hockey_smooth(x, fit2coefSN$B0[j]+fit2coefSN$delB0.2[j], 0,  
-##                           fit2coefSN$B1[j]+fit2coefSN$delB1.2[j], 
+    curve(hockey_smooth(x, fit2coefSN$B0[j]+fit2coefSN$delB0.2[j], 0,
+##                           fit2coefSN$B1[j]+fit2coefSN$delB1.2[j],
                            fit2coefSN$De[j]+fit2coefSN$delD.2[j],
-                           fit2coefSN$Ph[j]+fit2coefSN$delPh.2[j], 
+                           fit2coefSN$Ph[j]+fit2coefSN$delPh.2[j],
                            input.to.bugs$data$theta), add=T, col="grey")
   }
   temp <- owc_daily$Season=="Summer"
   text(log(0.01), log(0.5), "Summer")
   points(log(owc_daily$maTPLD05[temp]), log(owc_daily$TP_ef[temp]))
-  curve(hockey_smooth(x, fit2coefSN_sum[1,2] + fit2coefSN_sum[5,2], 0, 
-##                         fit2coefSN_sum[2,7] + fit2coefSN_sum[10,7], 
+  curve(hockey_smooth(x, fit2coefSN_sum[1,2] + fit2coefSN_sum[5,2], 0,
+##                         fit2coefSN_sum[2,7] + fit2coefSN_sum[10,7],
                          fit2coefSN_sum[2,2] + fit2coefSN_sum[9,2],
                          fit2coefSN_sum[3,2] + fit2coefSN_sum[13,2],
                       input.to.bugs$data$theta), add=T, lwd=2)
@@ -516,21 +423,21 @@ plot(xx,yy,type="n", xlab="", ylab="", axes=F)
   plot(xx,yy,type="n", xlab="", ylab="", axes=F)
   for (i in 1:200){
     j <- sample(1:length(fit2coefSN$B0),1, replace=F)
-    curve(hockey_smooth(x, fit2coefSN$B0[j]+fit2coefSN$delB0.3[j], 0, 
-##                           fit2coefSN$B1[j]+fit2coefSN$delB1.3[j], 
+    curve(hockey_smooth(x, fit2coefSN$B0[j]+fit2coefSN$delB0.3[j], 0,
+##                           fit2coefSN$B1[j]+fit2coefSN$delB1.3[j],
                            fit2coefSN$De[j]+fit2coefSN$delD.3[j],
-                           fit2coefSN$Ph[j]+fit2coefSN$delPh.3[j], 
+                           fit2coefSN$Ph[j]+fit2coefSN$delPh.3[j],
                            input.to.bugs$data$theta), add=T, col="grey")
   }
   temp <- owc_daily$Season=="Autumn"
   text(log(0.01), log(0.5), "Autumn")
   points(log(owc_daily$maTPLD05[temp]), log(owc_daily$TP_ef[temp]))
-  curve(hockey_smooth(x, fit2coefSN_sum[1,2] + fit2coefSN_sum[6,2], 0, 
-##                         fit2coefSN_sum[2,7] + fit2coefSN_sum[11,7], 
+  curve(hockey_smooth(x, fit2coefSN_sum[1,2] + fit2coefSN_sum[6,2], 0,
+##                         fit2coefSN_sum[2,7] + fit2coefSN_sum[11,7],
                       fit2coefSN_sum[2,2] + fit2coefSN_sum[10,2],
                          fit2coefSN_sum[3,2] + fit2coefSN_sum[14,2],
                       input.to.bugs$data$theta), add=T, lwd=2)
-axis(2, at=log(c(0.05,0.1,0.25,0.5)), 
+axis(2, at=log(c(0.05,0.1,0.25,0.5)),
      labels=as.character(c(0.05,0.1,0.25,0.5)))
 axis(1, at=log(c(0.01,0.1,1,10,75,150)),
        labels=as.character(c(0.01,0.1,1,10,75,150)))
@@ -542,20 +449,20 @@ par(mar=c(0.25,0.25,0.25,1))
   for (i in 1:200){
     j <- sample(1:length(fit2coefSN$B0),1, replace=F)
     curve(hockey_smooth(x, fit2coefSN$B0[j]+fit2coefSN$delB0.4[j], 0,
-##                           fit2coefSN$B1[j]+fit2coefSN$delB1.4[j], 
+##                           fit2coefSN$B1[j]+fit2coefSN$delB1.4[j],
                            fit2coefSN$De[j]+fit2coefSN$delD.4[j],
-                           fit2coefSN$Ph[j]+fit2coefSN$delPh.4[j], 
+                           fit2coefSN$Ph[j]+fit2coefSN$delPh.4[j],
                            input.to.bugs$data$theta), add=T, col="grey")
   }
   temp <- owc_daily$Season=="Winter"
   text(log(0.01), log(0.5), "Winter")
   points(log(owc_daily$maTPLD05[temp]), log(owc_daily$TP_ef[temp]))
-  curve(hockey_smooth(x, fit2coefSN_sum[1,2] + fit2coefSN_sum[7,2], 0, 
-##                         fit2coefSN_sum[2,7] + fit2coefSN_sum[12,7], 
+  curve(hockey_smooth(x, fit2coefSN_sum[1,2] + fit2coefSN_sum[7,2], 0,
+##                         fit2coefSN_sum[2,7] + fit2coefSN_sum[12,7],
                          fit2coefSN_sum[2,2] + fit2coefSN_sum[11,2],
                          fit2coefSN_sum[3,2] + fit2coefSN_sum[15,2],
                       input.to.bugs$data$theta), add=T, lwd=2)
-axis(4, at=log(c(0.05,0.1,0.25,0.5)), 
+axis(4, at=log(c(0.05,0.1,0.25,0.5)),
      labels=as.character(c(0.05,0.1,0.25,0.5)))
 axis(1, at=log(c(0.01,0.1,1,10,75,150)),
        labels=as.character(c(0.01,0.1,1,10,75,150)))
@@ -564,7 +471,7 @@ mtext("TP loading (ton/yr)", 1, 0.75,T)
 mtext("TP concentration (mg/L)", 2, 0.75, T, las=0)
   dev.off()
   
-  ## producing a table:
+  ## producing a tablle:
   
 write.csv(summary(exp(fit2coefSN[3] + fit2coefSN[12:15])), file="thresholds.csv")
 

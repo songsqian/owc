@@ -1,7 +1,7 @@
 ---
-title: "Old Woman Creek Project -- Bayesian Models "
+title: "Old Woman Creek Project -- Sample Size Estimation"
 author: "Song Qian"
-date: "March 11, 2019"
+date: "January 11, 2020"
 output: pdf_document
 editor_options: 
   chunk_output_type: console
@@ -9,68 +9,20 @@ editor_options:
 
 # Introduction 
 
-This Rmd file includes Bayesian updating code for the Old Woman Creek project. Data used include daily monitoring data from Old Woman Creek (divided into four seasons), Crane Creek, Coldwater Creek, and Olentangy.  The code in the previous Rmd files generate necessary input data and prior distributions for model parameters. 
+This Rmd file includes Bayesian updating code for the Old Woman Creek project. Data used include daily monitoring data from Old Woman Creek (divided into four seasons), Crane Creek, Coldwater Creek, and Olentangy.  The code in the previous Rmd files generate necessary input data and prior distributions for model parameters. The basic principle of sample size estimation centers on the need of achieving a desirable level of certainty.  Statistical methods for sample size estimation requires (1) an understanding of the target population (particularly information about the variance), (2) a specific level of desired certainty, and (3) the statistical method to be applied to the data.  For example, when the intended statistical method is the $t$-test for a one-sample comparison problem, the planned sample size is dependent on the desired power ($1-\beta$) of detecting a specific effect size ($\delta$).  In addition, the sample size is also a function of the population variance ($\sigma^2$).  The $t$-test formula can then be used to estimate the required sample size.  
+
+The problem of estimating the necessary sample size in a restored wetland for the purpose of estimating the wetland's phosphorus retention capacity is dependent on how we define the desired certainty or uncertainty (as in the power and effect size in the $t$-test example) and a direct link between sample size and the level of uncertainty.  These conditions require a great deal of understanding of the wetland and its phosphorus retention process, which are what we want to learn from the monitoring program.  Because we used a Monte Carlo simulation based model fitting method, the relationship between sample size and model uncertainty is not available in analytic form.  Consequently, sample size estimation can only be done using Monte Carlo simulation. However, a successful Monte Carlo simulation depends on our capability of replicate data that are representative of what we would obtain from sampling from the wetland.  That is, we must know how a wetland retains phosphorus before we can simulate the process.  Consequently, we don't expect an accurate estimation of the required sample size.  The simulation algorithm presented here is aimed to provide a conservative estimate, using the Coldwater Creek (CwC) data as an example.  
+
+We used the initial CwC data (8 monthly means) to fit the hockey stick model. The resulting model is highly uncertain reflected in the large variance in the estimated phosphorus retention capacity.  Using this uncertain model, we simulate the actual monitoring process with a specific sample size $n$.  This is done by first drawing $n$ uniformly distributed random TP loading data within the range of the observed loading.  Then, for each loading sample we calculate the expected TP effluent concentration and its variance using the fitted model. The expected value and the variance form the predictive distribution of the effluent TP concentration at the given loading, from which we draw a random number to represent an observed log TP concentration value. With the $n$ pairs of loading and concentration values, we fit the hockey stick model and retain the MCMC samples of all estimated model coefficients.  The process is then repeated many ($k$) times.  At the end of the simulation process, we have $k$ sets of MCMC samples for each model parameter.  These $k$ sets of samples are combined to produce the posterior distributions of the estimated parameters.  By using a number of potential sample sizes, we can graphically examine how the estimation uncertainty (e.g., the width of the 95% credible interval of the posterior distributions of model parameters) decreases as sample size increases and select a desired sample size.  
+
+If the goal of a monitoring plan is to estimate the phosphorus retention capacity of a newly restored wetland, this process allows us to develop a monitoring plan (e.g., monitoring a newly restored wetland for two years with a weekly or bi-weekly sample frequency) and update the monitoring periodically to decide whether further monitoring is necessary.  
+
+In this document, we illustrate the process using data from CwC.  
 
 ```{r setup, include=FALSE}
 ## functions and setup
-to2 <- function(x){
-    ## conver a single digit integer to 0x
-    return(ifelse (x<10, paste("0",x, sep=""), as.character(x)))
-}
-
-hockey_smooth <- function(x, beta0, beta1=0, delta, phi, theta=NULL)
-{
-    if (is.null(theta)) theta=0.01*diff(range(x))
-    return(beta0 + beta1 * (x-phi) +
-           delta * theta * log1p(exp((x-phi)/theta)))
-}
-
-line.plots <- function(est, se, Ylabel, Xlab, yaxis=2, Xlim=NULL,
-                       rscale=F, At=NULL, Lab=NULL, V=0){
-    if (is.null(Xlim)) Xlim <- range(c(est+2*se, est-2*se))
-    n <- length(est)
-    if(n != length(se))stop("lengths not match")
-    plot(1:n, 1:n, xlim=Xlim, ylim=c(0.75, n+0.25),
-         type="n", axes=F, xlab=Xlab, ylab="")
-    if (rscale)
-        axis(1, at=At, labels=Lab)
-    else
-        axis(1)
-    axis(yaxis, at=1:n, labels=Ylabel, las=1)
-    segments(y0=1:n, y1=1:n, x0=est-2*se, x1=est+2*se)
-    segments(y0=1:n, y1=1:n, x0=est-1*se, x1=est+1*se, lwd=2.5)
-    points(est, 1:n)
-    if (!is.null(V)) abline(v=V, col="gray")
-    invisible()
-}
-
-packages<-function(x, repos="http://cran.r-project.org", ...){
-    x<-as.character(match.call()[[2]])
-    if (!require(x,character.only=TRUE)){
-        install.packages(pkgs=x, repos=repos, ...)
-        require(x,character.only=TRUE)
-    }
-}
-
-packages(tidyverse)
-
-packages(ggplot2)
-packages(rv)
-packages(arm)
-packages(lattice)
-packages(tikzDevice)
-packages(car)
-packages(formatR)
-packages(rstan)
-
-rstan_options(auto_write = TRUE)
-options(mc.cores = min(c(parallel::detectCores(), 8)))
-
-nchains <-  min(c(parallel::detectCores(), 8))
-niters <- 100000
-nkeep <- 2500
-nthin <- ceiling((niters/2)*nchains/nkeep)
-
+source("FrontMatter.R")
+load("owc_data.RData")
 ```
 ## Importing Data
 
@@ -78,16 +30,13 @@ nthin <- ceiling((niters/2)*nchains/nkeep)
 ```{r read}
 base <- getwd()
 dataDIR <- paste(base, "Data", sep="/")
-
 load("owc_data.RData")
-
 ```
 
 Prior function from previous Rmd file
 
 ```{r}
 ## using the hierarchcial mdoel for the prior
-
 prior <- function(fit, b0="B0", de="De", ph="Ph",
                   s0="sigma0",sD="sigmaD",sP="sigmaP",
                   n0=20, setn0=F){
@@ -314,10 +263,10 @@ prr <- prior(fit2)
 ```
 # Bayesian Sample Size Estimation
 
-Using Monte Carlo simulation, we draw random samples of various sizes based on existing estimates of the hockey stick model parameters. For each set of samples, another model is fit to estimate model parameters.  The results will be presented as a plot of the estimated threshold (with its 90% credible interval) as a function of sample size.  We use the Coldwater Creek data as an example.
+The following R functions implement the Monte Carlo simulation method described in the Introduction section.   
 
 ```{r}
-## input file:
+## input file:  generating input data for the Stan model
 stan.inSZ <- function(x, y, n.chains=4, prrs = prr, sz){
         n <- length(x)
         m0 = prrs$m0
@@ -359,13 +308,13 @@ stan.inSZ <- function(x, y, n.chains=4, prrs = prr, sz){
     return(list(para=para, data=bugs.data,
                 inits=inits,n.chains=n.chains, sz=sz))
 }
-##cwc data
+##cwc data -- from the saved output of theinitial run of the stan model
 tmp <- cwc_month$flow!=0
 load("ColdCreek_STDZ.RData")
-fitcoefCWC_temp <- summary(rvsims(as.matrix(as.data.frame(extract(fitCWC, permute=T))))) ## using standardized only
+fitcoefCWC_temp <- summary(rvsims(as.matrix(as.data.frame(rstan::extract(fitCWC, permute=T))))) ## using standardized only
 fit <- stan_model(model_code = stan_model3)
 
-## sample size
+## sample size - a function to simulate the sampling process
 
 sim_sz <- function(n=12, k=100, stanmodel=fit, prior_coef=fitcoefCWC_temp){
      fitcoefSZ_sim <- list(phi=rvsims(0), 
@@ -373,7 +322,7 @@ sim_sz <- function(n=12, k=100, stanmodel=fit, prior_coef=fitcoefCWC_temp){
                            delta=rvsims(0))
      for (i in 1:k){
         print(paste(i, "of", k, ", sample size =", n))
-        x <- rnorm(n)
+        x <- rnorm(n) ## TP loading is standardized
         mnY <- hockey_smooth(x, prior_coef[1,2] , 0,
                                 prior_coef[2,2] ,
                                 prior_coef[3,2] ,
@@ -388,7 +337,7 @@ sim_sz <- function(n=12, k=100, stanmodel=fit, prior_coef=fitcoefCWC_temp){
                             chains=input.to.stan$n.chains,
                             control=list(adapt_delta = 0.99, 
                                          max_treedepth=25))
-        temp_sim <-  rvsims(as.matrix(as.data.frame(extract(fit_sim, permute=T))))
+        temp_sim <-  rvsims(as.matrix(as.data.frame(rstan::extract(fit_sim, permute=T))))
         fitcoefSZ_sim$beta0 <- fitcoefSZ_sim$beta0 + temp_sim[1]/k
         fitcoefSZ_sim$delta <- fitcoefSZ_sim$delta + temp_sim[2]/k
         fitcoefSZ_sim$phi <- fitcoefSZ_sim$phi + temp_sim[3]/k
@@ -396,7 +345,7 @@ sim_sz <- function(n=12, k=100, stanmodel=fit, prior_coef=fitcoefCWC_temp){
      return(fitcoefSZ_sim)
 }
 
-n <- (1:10)*12
+n <- (1:15)*12  ## 10 pre-set sample sizes
 
 smplsz_sim <- list()
 for (j in 1:4)
@@ -408,7 +357,7 @@ for (j in 5:6)
 for (j in 7:8)
   smplsz_sim[[j]] <- sim_sz(n=n[j])
 
-for (j in 9:10)
+for (j in 9:15)
   smplsz_sim[[j]] <- sim_sz(n=n[j])
 
 save(smplsz_sim, file="CWC_SZ_sim.RData")
@@ -419,29 +368,19 @@ load("CWC_SZ_sim.RData")
 Results are presented graphically by comparing the estimated model coefficients, especially the estimated threshold.
 
 ```{r}
-j=0
-sim_plot_phi <- NULL
-for (i in n) {
-  j=j+1
-  sim_plot_phi <- rbind(sim_plot_phi, c(i, unlist(summary(smplsz_sim[[j]]$phi))))
+sim_plot <- function(size_n=n, sim_out=smplsz_sim, para="phi"){
+  j=0	
+  temp <- NULL
+  for (i in size_n) {
+    j=j+1
+    temp <- rbind(temp, c(i, unlist(summary(sim_out[[j]][[para]]))))
+  }
+  return (as.data.frame(temp))
 }
-sim_plot_phi <- as.data.frame(sim_plot_phi)
 
-j=0
-sim_plot_beta0 <- NULL
-for (i in n) {
-  j=j+1
-  sim_plot_beta0 <- rbind(sim_plot_beta0, c(i, unlist(summary(smplsz_sim[[j]]$beta0))))
-}
-sim_plot_beta0 <- as.data.frame(sim_plot_beta0)
-
-j=0
-sim_plot_delta <- NULL
-for (i in n) {
-  j=j+1
-  sim_plot_delta <- rbind(sim_plot_delta, c(i, unlist(summary(smplsz_sim[[j]]$delta))))
-}
-sim_plot_delta <- as.data.frame(sim_plot_delta)
+sim_plot_phi <- sim_plot(para="phi")
+sim_plot_beta0 <- sim_plot(para="beta0")
+sim_plot_delta <- sim_plot(para="delta")
 
 tikz(file="sz_sim.tex", width=6, height=4, standAlone=F)
 par(mfrow=c(1,3), mar=c(4, 4, 1, 1), mgp=c(1.25,0.125, 0), 
@@ -476,7 +415,7 @@ par(mar=c(4, 4, 1, 1), mgp=c(1.25,0.125, 0),
     las=1, tck=0.01)
 line.plots(sim_plot_phi$mean, sim_plot_phi$sd, 
            Xlab="Threshold (ton/yr)",
-           Ylabel=sim_plot[,1],
+           Ylabel=sim_plot_phi[,1],
            rscale=T,
            At=log(seq(0.3, 0.8, 0.1)),
            Lab=as.character(seq(0.3,0.8,0.1)),
@@ -489,7 +428,7 @@ par(mar=c(4, 4, 1, 1), mgp=c(1.25,0.125, 0),
     las=1, tck=0.01)
 line.plots(sim_plot_beta0$mean, sim_plot_beta0$sd, 
            Xlab="Intercept",
-           Ylabel=sim_plot[,1],
+           Ylabel=sim_plot_beta0[,1],
            rscale=T,
            V=NULL)
 box()
@@ -500,12 +439,65 @@ par(mar=c(4, 4, 1, 1), mgp=c(1.25,0.125, 0),
     las=1, tck=0.01)
 line.plots(sim_plot_delta$mean, sim_plot_delta$sd, 
            Xlab="Slope Change",
-           Ylabel=sim_plot[,1],
+             Ylabel=sim_plot_delta[,1],
            rscale=T,
            V=NULL)
 box()
 dev.off()
 
+```
 
+## Interpreting and Updating Simulation Results
+
+Based on the figures, we note that the estimation uncertainty (the width of the 90% credible interval) is visibly reduced starting from $n=48$. Further increase in sample size beyond that may not result in improved estimation.  Because the simulation model was based on the initial model fit to only eight observations, we are using a highly uncertain model.  As a result, our estimated sample size is overly conservative. We can repeat the process using the updated CwC model.
+
+```{r}
+tmp <- cwc_month$flow!=0
+load("ColdCreek_STDZ_n.RData")
+fitcoefCWC_temp <- summary(rvsims(as.matrix(as.data.frame(rstan::extract(fitCWC_n, permute=T))))) ## using standardized only
+fit <- stan_model(model_code = stan_model3)
+
+n <- (1:15)*12  ## 10 pre-set sample sizes
+
+smplsz_sim_n <- list()
+for (j in 1:9)
+  smplsz_sim_n[[j]] <- sim_sz(n=n[j])
+
+for (j in 10:15)
+  smplsz_sim_n[[j]] <- sim_sz(n=n[j])
+
+save(smplsz_sim_n, file="CWC_SZ_sim_n.RData")
+## load("CWC_SZ_sim_n.RData")
+
+sim_plot_phi <- sim_plot(sim_out=smplsz_sim_n, para="phi")
+sim_plot_beta0 <- sim_plot(sim_out=smplsz_sim_n, para="beta0")
+sim_plot_delta <- sim_plot(sim_out=smplsz_sim_n, para="delta")
+
+tikz(file="sz_sim_n.tex", width=6, height=4, standAlone=F)
+par(mfrow=c(1,3), mar=c(4, 4, 1, 1), mgp=c(1.25,0.125, 0), 
+    las=1, tck=0.01)
+line.plots(sim_plot_phi$mean, sim_plot_phi$sd, 
+           Xlab="Threshold (ton/yr)",
+           Ylabel=sim_plot_phi[,1],
+           rscale=T,
+           At=log(seq(0.3, 0.8, 0.1)),
+           Lab=as.character(seq(0.3,0.8,0.1)),
+           V=NULL)
+box()
+
+line.plots(sim_plot_beta0$mean, sim_plot_beta0$sd, 
+           Xlab="Intercept",
+           Ylabel=sim_plot_beta0[,1],
+           rscale=T,
+           V=NULL)
+box()
+
+line.plots(sim_plot_delta$mean, sim_plot_delta$sd, 
+           Xlab="Slope change",
+           Ylabel=sim_plot_delta[,1],
+           rscale=T,
+           V=NULL)
+box()
+dev.off()
 ```
 
