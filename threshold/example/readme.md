@@ -11,7 +11,7 @@ The first code cell includes three lines. The first line calls python's R extens
 The next two code cells import data for the example.  The model fitting process is divided into six steps, each with its own code cell. The first four steps set up the Bayesian model, which will run relatively fast.  
 
 ## Running the model
-Running the Bayesian model starts in the code cell starts (on line 2) with the line `fit <- stan_model(...)` (step 5).  This cell takes a few minutes to complete.  The results are processed in step 6 in the following code cell.
+Running the Bayesian model starts in the code cell starts (on line 2) with the line `fit <- stan_model(...)` (step 5).  This cell takes a few minutes to complete.  When the model is completed, a number (the order of code cells executed) will appear in the bracket (e.g., `[4]`). The results are processed in step 6 in the following code cell.
 
 The last code cell runs the updated model using new data.
 
